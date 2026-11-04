@@ -7,6 +7,7 @@ import android.os.Bundle
 import com.stardust.app.SimpleActivityLifecycleCallbacks
 import com.stardust.autojs.core.accessibility.AccessibilityBridge
 import com.stardust.autojs.core.activity.ActivityInfoProvider
+import com.stardust.autojs.core.agent.SemanticRecorder
 import com.stardust.autojs.core.console.ConsoleImpl
 import com.stardust.autojs.core.console.GlobalConsole
 import com.stardust.autojs.core.image.capture.ScreenCaptureManager
@@ -48,6 +49,7 @@ abstract class AutoJs protected constructor(protected val application: Applicati
         AccessibilityNotificationObserver(mContext)
     private val mScreenCaptureRequester: ScreenCaptureRequester = ScreenCaptureManager()
 
+    val semanticRecorder: SemanticRecorder = SemanticRecorder()
     val layoutInspector: LayoutInspector = LayoutInspector(mContext)
     val scriptEngineManager: ScriptEngineManager = ScriptEngineManager(mContext)
     val uiHandler: UiHandler = UiHandler(mContext)
@@ -151,6 +153,7 @@ abstract class AutoJs protected constructor(protected val application: Applicati
         addDelegate(100, infoProvider)
         addDelegate(200, mNotificationObserver)
         addDelegate(300, accessibilityActionRecorder)
+        addDelegate(400, semanticRecorder)
     }
 
     abstract fun waitForAccessibilityServiceEnabled()
