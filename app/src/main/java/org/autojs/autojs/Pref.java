@@ -23,6 +23,7 @@ public class Pref {
     private static final String KEY_SERVER_ADDRESS = "KEY_SERVER_ADDRESS";
     private static final String KEY_SHOULD_SHOW_ANNUNCIATION = "KEY_SHOULD_SHOW_ANNUNCIATION";
     private static final String KEY_FLOATING_MENU_SHOWN = "KEY_FLOATING_MENU_SHOWN";
+    private static final String KEY_AGENT_BUBBLE_SHOWN = "agent_bubble_shown";
     private static final String KEY_EDITOR_THEME = "editor.theme";
     private static final String KEY_EDITOR_TEXT_SIZE = "editor.textSize";
     private static final String KEY_EDITOR_NEW = "KEY_EDITOR_NEW";
@@ -156,6 +157,14 @@ public class Pref {
 
     public static void setFloatingMenuShown(boolean checked) {
         def().edit().putBoolean(KEY_FLOATING_MENU_SHOWN, checked).apply();
+    }
+
+    public static boolean isAgentBubbleShown() {
+        return def().getBoolean(KEY_AGENT_BUBBLE_SHOWN, false);
+    }
+
+    public static void setAgentBubbleShown(boolean checked) {
+        def().edit().putBoolean(KEY_AGENT_BUBBLE_SHOWN, checked).apply();
     }
 
     public static String getCurrentTheme() {

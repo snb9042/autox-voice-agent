@@ -91,6 +91,7 @@ import org.autojs.autojs.Pref
 import org.autojs.autojs.autojs.AutoJs
 import org.autojs.autojs.external.foreground.ForegroundService
 import org.autojs.autojs.timing.TimedTaskScheduler
+import org.autojs.autojs.ui.agent.AgentBubble
 import org.autojs.autojs.ui.build.ProjectConfigActivity
 import org.autojs.autojs.ui.common.ScriptOperations
 import org.autojs.autojs.ui.compose.theme.AutoXJsTheme
@@ -138,6 +139,10 @@ class MainActivity : FragmentActivity() {
         if (Pref.isFloatingMenuShown() && !FloatyWindowManger.isCircularMenuShowing()) {
             if (DrawOverlaysPermission.isCanDrawOverlays(this)) FloatyWindowManger.showCircularMenu()
             else Pref.setFloatingMenuShown(false)
+        }
+        if (Pref.isAgentBubbleShown() && !AgentBubble.isShowing()) {
+            if (DrawOverlaysPermission.isCanDrawOverlays(this)) AgentBubble.show(this)
+            else Pref.setAgentBubbleShown(false)
         }
         setContent {
             scope = rememberCoroutineScope()

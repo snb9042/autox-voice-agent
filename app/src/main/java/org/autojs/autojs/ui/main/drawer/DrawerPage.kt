@@ -53,6 +53,7 @@ import org.autojs.autojs.devplugin.DevPlugin
 import org.autojs.autojs.external.foreground.ForegroundService
 import org.autojs.autojs.tool.AccessibilityServiceTool
 import org.autojs.autojs.tool.WifiTool
+import org.autojs.autojs.ui.agent.AgentBubble
 import org.autojs.autojs.ui.build.MyTextField
 import org.autojs.autojs.ui.compose.theme.AutoXJsTheme
 import org.autojs.autojs.ui.compose.widget.MyAlertDialog1
@@ -104,6 +105,7 @@ fun DrawerPage() {
 
             Text(text = stringResource(id = R.string.text_script_record))
             FloatingWindowSwitch()
+            AgentBubbleSwitch()
             VolumeDownControlSwitch()
             AutoBackupSwitch()
 
@@ -575,6 +577,42 @@ private fun FloatingWindowSwitch() {
             }
             isFloatingWindowShowing = FloatyWindowManger.isCircularMenuShowing()
             Pref.setFloatingMenuShown(isFloatingWindowShowing)
+        }
+    )
+}
+
+@Composable
+private fun AgentBubbleSwitch() {
+    val context = LocalContext.current
+
+    var isAgentBubbleShowing by remember {
+        mutableStateOf(AgentBubble.isShowing())
+    }
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+        onResult = {
+            if (DrawOverlaysPermission.isCanDrawOverlays(context)) AgentBubble.show(context)
+            isAgentBubbleShowing = AgentBubble.isShowing()
+        }
+    )
+    SwitchItem(
+        icon = {
+            MyIcon(
+                painterResource(id = R.drawable.ic_record),
+                null
+            )
+        },
+        text = { Text(text = stringResource(id = R.string.text_agent_bubble)) },
+        checked = isAgentBubbleShowing,
+        onCheckedChange = {
+            if (isAgentBubbleShowing) {
+                AgentBubble.hide()
+            } else {
+                if (DrawOverlaysPermission.isCanDrawOverlays(context)) AgentBubble.show(context)
+                else launcher.launchCanDrawOverlaysSettings(context.packageName)
+            }
+            isAgentBubbleShowing = AgentBubble.isShowing()
+            Pref.setAgentBubbleShown(isAgentBubbleShowing)
         }
     )
 }
