@@ -1,6 +1,7 @@
 package com.stardust.autojs.core.agent
 
 import android.graphics.Rect
+import kotlin.math.sqrt
 
 data class Bounds(val left: Int, val top: Int, val right: Int, val bottom: Int) {
 
@@ -10,7 +11,7 @@ data class Bounds(val left: Int, val top: Int, val right: Int, val bottom: Int) 
     fun distanceTo(other: Bounds): Double {
         val dx = (centerX() - other.centerX()).toDouble()
         val dy = (centerY() - other.centerY()).toDouble()
-        return dx * dx + dy * dy
+        return sqrt(dx * dx + dy * dy)
     }
 
     companion object {

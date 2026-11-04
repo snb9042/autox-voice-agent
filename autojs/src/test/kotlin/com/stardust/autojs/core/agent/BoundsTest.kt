@@ -33,4 +33,11 @@ class BoundsTest {
     fun `closestTo returns null for an empty candidate list`() {
         assertNull(Bounds.closestTo(Bounds(0, 0, 10, 10), emptyList()))
     }
+
+    @Test
+    fun `distanceTo returns true Euclidean distance, not squared distance`() {
+        val a = Bounds(0, 0, 0, 0)
+        val b = Bounds(0, 0, 12, 16) // center at (6, 8) -> 3-4-5-scaled right triangle, distance 10
+        assertEquals(10.0, a.distanceTo(b), 0.0001)
+    }
 }
