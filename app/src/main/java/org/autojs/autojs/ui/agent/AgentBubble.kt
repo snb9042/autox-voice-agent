@@ -97,8 +97,7 @@ class AgentBubble(context: Context) {
                 )
                 .itemsCallback { _, _, position, _ ->
                     when (position) {
-                        0 -> {
-                            showPreviewDialog(script)
+                        0 -> showPreviewDialog(script) {
                             showSummaryDialog(stepCount, script)
                         }
                         1 -> ScriptOperations(mContext, null).newScriptFileForScript(script)
@@ -110,7 +109,7 @@ class AgentBubble(context: Context) {
         )
     }
 
-    private fun showPreviewDialog(script: String) {
+    private fun showPreviewDialog(script: String, onDismiss: () -> Unit) {
         val textView = TextView(mContext).apply {
             text = script
             typeface = Typeface.MONOSPACE
@@ -123,6 +122,7 @@ class AgentBubble(context: Context) {
                 .title(R.string.text_preview)
                 .customView(scrollView, false)
                 .positiveText(R.string.ok)
+                .dismissListener { onDismiss() }
                 .build()
         )
     }
@@ -154,8 +154,9 @@ class AgentBubble(context: Context) {
 
         fun show(context: Context) {
             if (instance != null) return
-            context.startService(Intent(context, FloatyService::class.java))
-            instance = AgentBubble(context)
+            val appContext = context.applicationContext
+            appContext.startService(Intent(appContext, FloatyService::class.java))
+            instance = AgentBubble(appContext)
         }
 
         fun hide() {
