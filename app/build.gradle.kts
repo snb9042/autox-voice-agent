@@ -282,26 +282,34 @@ tasks.register("installationDocumentation") {
         if (File(docV1Dir, "index.html").isFile) {
             return@doFirst
         }
-        okhttp3.OkHttpClient().newCall(Request.Builder().url(docV1Uri).build()).execute()
-            .use { response ->
-                check(response.isSuccessful) { "installationDocumentation failed" }
-                val body = response.body!!
-                ZipInputStream(body.byteStream()).use { zip ->
-                    var zipEntry: ZipEntry?
-                    while (true) {
-                        zipEntry = zip.nextEntry ?: break
-                        val file = File(docV1Dir, zipEntry.name.replaceFirst(Regex(".+?/"), ""))
-                        if (zipEntry.isDirectory) {
-                            file.mkdirs()
-                        } else {
-                            file.outputStream().use {
-                                zip.copyTo(it)
+        try {
+            okhttp3.OkHttpClient().newCall(Request.Builder().url(docV1Uri).build()).execute()
+                .use { response ->
+                    check(response.isSuccessful) { "installationDocumentation failed" }
+                    val body = response.body!!
+                    ZipInputStream(body.byteStream()).use { zip ->
+                        var zipEntry: ZipEntry?
+                        while (true) {
+                            zipEntry = zip.nextEntry ?: break
+                            val file = File(docV1Dir, zipEntry.name.replaceFirst(Regex(".+?/"), ""))
+                            if (zipEntry.isDirectory) {
+                                file.mkdirs()
+                            } else {
+                                file.outputStream().use {
+                                    zip.copyTo(it)
+                                }
                             }
+                            zip.closeEntry()
                         }
-                        zip.closeEntry()
                     }
                 }
-            }
+        } catch (e: Exception) {
+            // Offline docs are a nice-to-have bundled asset, not a build
+            // requirement: don't fail the whole build when this upstream
+            // zip is unreachable (it has been observed 404ing entirely,
+            // not just flaky), so every other Gradle task keeps working.
+            logger.warn("installationDocumentation: skipping offline docs download (${e.message})")
+        }
     }
 }
 tasks.named("clean").configure {
