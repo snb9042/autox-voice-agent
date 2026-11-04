@@ -7,6 +7,9 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.stardust.autojs.core.image.ImageWrapper
 import com.stardust.autojs.core.image.capture.ScreenCaptureManager
 import com.stardust.view.accessibility.AccessibilityNodeInfoHelper
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.UUID
@@ -38,14 +41,29 @@ class ScreenStateReader {
     }
 
     private fun captureTemplate(service: AccessibilityService, bounds: Bounds): String? {
-        return try {
-            runBlocking {
-                if (screenCaptureManager.screenCapture?.available != true) {
+        if (screenCaptureManager.screenCapture?.available != true) {
+            // Requesting screen-capture permission involves awaiting an
+            // activity-result callback that runs on the main looper. We're
+            // called from the accessibility-event (main) thread, so blocking
+            // here would deadlock waiting on the very looper the callback
+            // needs. Kick off the request in the background instead and fall
+            // back to CLICK_BOUNDS for this tap; once granted, later taps use
+            // the real template path below.
+            CoroutineScope(Dispatchers.Default).launch {
+                try {
                     screenCaptureManager.requestScreenCapture(
                         service.applicationContext,
                         service.resources.configuration.orientation
                     )
+                } catch (e: Exception) {
+                    // Permission denied or request failed; the next qualifying
+                    // tap will simply retry the request.
                 }
+            }
+            return null
+        }
+        return try {
+            runBlocking {
                 val screen = screenCaptureManager.screenCapture?.captureImageWrapper() ?: return@runBlocking null
                 val cropped = cropToBounds(screen, bounds) ?: return@runBlocking null
                 val file = File(templateDirFor(service), "${UUID.randomUUID()}.png")
