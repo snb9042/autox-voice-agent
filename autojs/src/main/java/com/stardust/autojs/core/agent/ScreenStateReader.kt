@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.view.accessibility.AccessibilityNodeInfo
 import com.stardust.autojs.core.image.ImageWrapper
 import com.stardust.autojs.core.image.capture.ScreenCaptureManager
+import com.stardust.autojs.runtime.api.Paddle
 import com.stardust.view.accessibility.AccessibilityNodeInfoHelper
 import kotlinx.coroutines.runBlocking
 import java.io.File
@@ -174,6 +175,63 @@ class ScreenStateReader {
         return templateDir ?: File(service.applicationContext.filesDir, "agent_templates").also {
             it.mkdirs()
             templateDir = it
+        }
+    }
+
+    /**
+     * Everything visible right now, for the voice agent to reason over: every
+     * accessibility node's text/content-description with its bounds, plus (when
+     * screen-capture is already available - this never prompts for it) OCR text
+     * for labels with no accessible text. Call off the main thread: OCR on a
+     * full screenshot is not fast enough to run on the accessibility-event
+     * thread, the same reason template capture already runs on
+     * [captureExecutor].
+     */
+    fun describeScreen(service: AccessibilityService): ScreenDescription {
+        val root = service.rootInActiveWindow
+            ?: return ScreenDescription(Bounds(0, 0, 0, 0), emptyList())
+        val screenBounds = Bounds.fromRect(AccessibilityNodeInfoHelper.getBoundsInScreen(root))
+        val visible = mutableListOf<VisibleText>()
+        collectVisibleText(root, visible)
+        root.recycle()
+        visible.addAll(ocrFallback())
+        return ScreenDescription(screenBounds, visible)
+    }
+
+    private fun collectVisibleText(node: AccessibilityNodeInfo, out: MutableList<VisibleText>) {
+        if (node.isVisibleToUser) {
+            val text = node.text?.toString()?.takeIf { it.isNotBlank() }
+            val desc = node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+            val bounds = Bounds.fromRect(AccessibilityNodeInfoHelper.getBoundsInScreen(node))
+            when {
+                text != null -> out.add(VisibleText(text, MatchBy.TEXT, bounds))
+                desc != null -> out.add(VisibleText(desc, MatchBy.DESC, bounds))
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectVisibleText(child, out)
+            child.recycle()
+        }
+    }
+
+    /**
+     * Best-effort text for labels with no accessible text/description. Never
+     * requests screen-capture permission - that belongs to an explicit user
+     * action (recording an unlabeled tap), not a side effect of speaking an
+     * instruction. Returns nothing if permission isn't already available.
+     */
+    private fun ocrFallback(): List<VisibleText> {
+        val capturer = screenCaptureManager.screenCapture?.takeIf { it.available } ?: return emptyList()
+        return try {
+            runBlocking {
+                val screen = capturer.captureImageWrapper() ?: return@runBlocking emptyList()
+                Paddle().ocr(screen).map {
+                    VisibleText(it.text, MatchBy.TEXT, Bounds.fromRect(it.bounds))
+                }
+            }
+        } catch (e: Exception) {
+            emptyList()
         }
     }
 }
