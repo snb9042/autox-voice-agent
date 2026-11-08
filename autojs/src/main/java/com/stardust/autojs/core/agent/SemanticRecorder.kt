@@ -43,8 +43,21 @@ class SemanticRecorder(
     }
 
     fun stop(): List<SemanticAction> {
-        generation.incrementAndGet()
+        // Order matters. Flipping to IDLE first stops new events from being
+        // recorded straight away, but deliberately leaves this recording's
+        // generation intact so that captures already queued or running can
+        // still swap their results into recordedActions. Bumping the
+        // generation here instead - as this used to - is exactly what threw
+        // away every in-flight capture, silently leaving those steps as
+        // fixed-coordinate CLICK_BOUNDS fallbacks.
         state = State.IDLE
+        // Bounded: on timeout we simply proceed, so an unanswered
+        // screen-capture permission dialog can't wedge the caller (stop() runs
+        // on the UI thread, from the bubble's Stop tap).
+        screenStateReader.awaitPendingCaptures(CAPTURE_DRAIN_TIMEOUT_MS)
+        // Only now is it safe to invalidate whatever is still outstanding, and
+        // only now does the snapshot include the swaps that just landed.
+        generation.incrementAndGet()
         return recordedActions.toList()
     }
 
@@ -97,8 +110,13 @@ class SemanticRecorder(
         val startedGeneration = generation.get()
         screenStateReader.captureTemplateAsync(service, target.bounds) { path ->
             if (path == null) return@captureTemplateAsync
+            // Deliberately *not* testing `state != State.RECORDING` here:
+            // stop() sets IDLE before draining this executor precisely so
+            // in-flight captures can still land, and a state test would mark
+            // every one of them stale again. The generation check is
+            // sufficient on its own - stop() is the only path to IDLE, and it
+            // always bumps the generation once the drain is done.
             val stale = generation.get() != startedGeneration ||
-                state != State.RECORDING ||
                 index >= recordedActions.size ||
                 recordedActions[index] !== placeholder
             if (stale) {
@@ -150,5 +168,16 @@ class SemanticRecorder(
         }
         val bounds = Bounds.fromRect(AccessibilityNodeInfoHelper.getBoundsInScreen(source))
         recordedActions.add(SemanticAction(type = ActionType.SCROLL, bounds = bounds, scrollDirection = direction))
+    }
+
+    companion object {
+        /**
+         * How long stop() waits for already-started captures to finish. A real
+         * capture + crop + PNG encode + write is well under a second; three
+         * seconds leaves generous headroom for one such job queued behind
+         * another while staying clearly inside the ~5s input-dispatch ANR
+         * window, since stop() is reached from a user tap on the main thread.
+         */
+        private const val CAPTURE_DRAIN_TIMEOUT_MS = 3_000L
     }
 }

@@ -10,6 +10,8 @@ import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 class ScreenStateReader {
 
@@ -82,6 +84,33 @@ class ScreenStateReader {
             } catch (e: Exception) {
                 // A failing consumer must not kill the capture thread.
             }
+        }
+    }
+
+    /**
+     * Blocks the caller until every capture job that was already queued or
+     * running when this was called has finished - including the [onCaptured]
+     * consumer it runs on this same thread - or until [timeoutMs] elapses,
+     * whichever comes first. Never blocks indefinitely.
+     *
+     * This works because [captureExecutor] is single-threaded and runs tasks
+     * strictly in submission order: a marker task submitted now cannot start
+     * until all previously submitted work has completed. Returns true if the
+     * queue actually drained, false if it timed out or the wait failed.
+     */
+    fun awaitPendingCaptures(timeoutMs: Long): Boolean {
+        return try {
+            captureExecutor.submit(Runnable { }).get(timeoutMs, TimeUnit.MILLISECONDS)
+            true
+        } catch (e: TimeoutException) {
+            // A capture is still stuck - most likely on an unanswered
+            // screen-capture permission dialog. Give up waiting rather than
+            // leaving the caller (and, for stop(), the UI thread) hanging.
+            false
+        } catch (e: Exception) {
+            // Interrupted, rejected, or the marker task itself failed; nothing
+            // useful to do but stop waiting.
+            false
         }
     }
 
