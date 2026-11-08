@@ -1,6 +1,6 @@
 package com.stardust.autojs.core.agent
 
-enum class ActionType { CLICK_TEXT, CLICK_IMAGE, CLICK_BOUNDS, LONG_CLICK, FILL_TEXT, SCROLL }
+enum class ActionType { CLICK_TEXT, CLICK_IMAGE, CLICK_BOUNDS, LONG_CLICK, FILL_TEXT, SCROLL, WAIT }
 
 enum class ScrollDirection { UP, DOWN, LEFT, RIGHT }
 

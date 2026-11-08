@@ -109,6 +109,7 @@ object ActionScriptGenerator {
         ActionType.CLICK_IMAGE -> clickImageStep(action, index)
         ActionType.CLICK_BOUNDS -> clickBoundsStep(action, index)
         ActionType.SCROLL -> scrollStep(action, index)
+        ActionType.WAIT -> waitStep(action, index)
     }
 
     /**
@@ -217,6 +218,16 @@ object ActionScriptGenerator {
         return """
             |// Step $index: scroll $direction
             |if (!swipe($startX, $startY, $endX, $endY, 300)) throw Error("Step $index: scroll $direction failed");
+        """.trimMargin()
+    }
+
+    private fun waitStep(action: SemanticAction, index: Int): String {
+        val text = requireNotNull(action.targetText) { "Step $index (WAIT) has no targetText" }
+        val finder = finderFor(action.matchBy)
+        return """
+            |// Step $index: wait for "${comment(text)}"
+            |var step$index = $finder("${esc(text)}", ${action.bounds.centerX()}, ${action.bounds.centerY()}, $FIND_TIMEOUT_MS);
+            |if (!step$index) throw Error("Step $index: target \"${esc(text)}\" not found");
         """.trimMargin()
     }
 }

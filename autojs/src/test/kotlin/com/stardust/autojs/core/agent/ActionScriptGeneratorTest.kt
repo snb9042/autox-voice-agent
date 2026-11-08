@@ -221,6 +221,33 @@ class ActionScriptGeneratorTest {
         }
     }
 
+    @Test
+    fun `WAIT with a text label polls without clicking`() {
+        val script = ActionScriptGenerator.generate(
+            listOf(SemanticAction(ActionType.WAIT, bounds, targetText = "Loading complete", matchBy = MatchBy.TEXT))
+        )
+        assertTrue(script.contains("__findTextNear(\"Loading complete\""))
+        assertFalse(script.contains(".click()"))
+        assertFalse(script.contains(".longClick()"))
+        assertFalse(script.contains(".setText("))
+        assertTrue(script.contains("if (!step0) throw Error(\"Step 0: target \\\"Loading complete\\\" not found\");"))
+    }
+
+    @Test
+    fun `WAIT with a desc label uses findDescNear`() {
+        val script = ActionScriptGenerator.generate(
+            listOf(SemanticAction(ActionType.WAIT, bounds, targetText = "Submit button", matchBy = MatchBy.DESC))
+        )
+        assertTrue(script.contains("__findDescNear(\"Submit button\""))
+    }
+
+    @Test
+    fun `WAIT with no targetText throws`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ActionScriptGenerator.generate(listOf(SemanticAction(ActionType.WAIT, bounds)))
+        }
+    }
+
     private fun String.occurrencesOf(needle: String): Int {
         var count = 0
         var from = indexOf(needle)
