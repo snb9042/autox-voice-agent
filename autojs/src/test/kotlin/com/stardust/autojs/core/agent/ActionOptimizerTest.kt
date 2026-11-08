@@ -10,9 +10,9 @@ class ActionOptimizerTest {
     @Test
     fun `collapses repeated FILL_TEXT on the same field into the last value`() {
         val actions = listOf(
-            SemanticAction(ActionType.FILL_TEXT, fieldBounds, targetText = "Email", fillValue = "a"),
-            SemanticAction(ActionType.FILL_TEXT, fieldBounds, targetText = "Email", fillValue = "ab"),
-            SemanticAction(ActionType.FILL_TEXT, fieldBounds, targetText = "Email", fillValue = "abc")
+            SemanticAction(ActionType.FILL_TEXT, fieldBounds, targetText = "Email", matchBy = MatchBy.TEXT, fillValue = "a"),
+            SemanticAction(ActionType.FILL_TEXT, fieldBounds, targetText = "Email", matchBy = MatchBy.TEXT, fillValue = "ab"),
+            SemanticAction(ActionType.FILL_TEXT, fieldBounds, targetText = "Email", matchBy = MatchBy.TEXT, fillValue = "abc")
         )
         val result = ActionOptimizer.optimize(actions)
         assertEquals(1, result.size)
@@ -23,8 +23,8 @@ class ActionOptimizerTest {
     fun `does not collapse FILL_TEXT on different fields`() {
         val otherBounds = Bounds(0, 200, 200, 240)
         val actions = listOf(
-            SemanticAction(ActionType.FILL_TEXT, fieldBounds, targetText = "Email", fillValue = "a"),
-            SemanticAction(ActionType.FILL_TEXT, otherBounds, targetText = "Password", fillValue = "b")
+            SemanticAction(ActionType.FILL_TEXT, fieldBounds, targetText = "Email", matchBy = MatchBy.TEXT, fillValue = "a"),
+            SemanticAction(ActionType.FILL_TEXT, otherBounds, targetText = "Password", matchBy = MatchBy.TEXT, fillValue = "b")
         )
         assertEquals(2, ActionOptimizer.optimize(actions).size)
     }
@@ -50,8 +50,8 @@ class ActionOptimizerTest {
 
     @Test
     fun `leaves unrelated actions untouched and in order`() {
-        val click = SemanticAction(ActionType.CLICK_TEXT, fieldBounds, targetText = "Login")
-        val fill = SemanticAction(ActionType.FILL_TEXT, fieldBounds, targetText = "Email", fillValue = "a")
+        val click = SemanticAction(ActionType.CLICK_TEXT, fieldBounds, targetText = "Login", matchBy = MatchBy.TEXT)
+        val fill = SemanticAction(ActionType.FILL_TEXT, fieldBounds, targetText = "Email", matchBy = MatchBy.TEXT, fillValue = "a")
         val result = ActionOptimizer.optimize(listOf(click, fill))
         assertEquals(listOf(click, fill), result)
     }

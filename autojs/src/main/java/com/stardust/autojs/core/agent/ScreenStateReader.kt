@@ -2,65 +2,122 @@ package com.stardust.autojs.core.agent
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
-import android.os.Build
 import android.view.accessibility.AccessibilityNodeInfo
 import com.stardust.autojs.core.image.ImageWrapper
 import com.stardust.autojs.core.image.capture.ScreenCaptureManager
 import com.stardust.view.accessibility.AccessibilityNodeInfoHelper
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.Executors
 
 class ScreenStateReader {
 
-    data class TargetDescription(val bounds: Bounds, val text: String?, val imageTemplatePath: String?)
+    data class TargetDescription(
+        val bounds: Bounds,
+        val text: String?,
+        val matchBy: MatchBy?,
+        val imageTemplatePath: String? = null
+    )
 
     private val screenCaptureManager = ScreenCaptureManager()
     private var templateDir: File? = null
 
+    /**
+     * Single background thread for all screen-capture work. Everything here is
+     * called from the accessibility-event (main) thread, and capturing /
+     * cropping / saving a bitmap - let alone awaiting the screen-capture
+     * permission dialog - must never run there. One thread (rather than a pool
+     * or an unscoped coroutine launch) keeps captures serialized in recording
+     * order and keeps the permission request from being fired several times
+     * concurrently.
+     */
+    private val captureExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "agent-screen-capture").apply { isDaemon = true }
+    }
+
     fun describeClickTarget(service: AccessibilityService, node: AccessibilityNodeInfo): TargetDescription {
         val bounds = Bounds.fromRect(AccessibilityNodeInfoHelper.getBoundsInScreen(node))
-        val label = node.text?.toString()?.takeIf { it.isNotBlank() }
-            ?: node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
-        if (label != null) {
-            return TargetDescription(bounds, label, null)
+        node.text?.toString()?.takeIf { it.isNotBlank() }?.let {
+            return TargetDescription(bounds, it, MatchBy.TEXT)
         }
-        return TargetDescription(bounds, null, captureTemplate(service, bounds))
+        node.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let {
+            return TargetDescription(bounds, it, MatchBy.DESC)
+        }
+        // No matchable label. The caller is expected to fall back to an image
+        // template (see captureTemplateAsync) or to raw bounds.
+        return TargetDescription(bounds, null, null)
     }
 
     fun describeEditableTarget(service: AccessibilityService, node: AccessibilityNodeInfo): TargetDescription {
         val bounds = Bounds.fromRect(AccessibilityNodeInfoHelper.getBoundsInScreen(node))
-        val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            node.hintText?.toString()?.takeIf { it.isNotBlank() }
-        } else null
-        val label = hint ?: node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
-        return TargetDescription(bounds, label, null)
+        // Deliberately *not* using hintText: there is no Auto.js selector that
+        // can match on a hint (UiGlobalSelector has desc(...) but no hint(...)),
+        // so a hint-sourced label would generate a step that can never find its
+        // target. Without a content description we return a null label and let
+        // the caller fall back to bounds matching.
+        val desc = node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+        return TargetDescription(bounds, desc, desc?.let { MatchBy.DESC })
     }
 
+    /**
+     * Captures, crops and saves a template for [bounds] on the capture
+     * executor, then invokes [onCaptured] on that same background thread with
+     * the staged file's absolute path, or null if the capture was not possible
+     * (no permission yet, capture failed, ...). Never blocks the caller.
+     */
+    fun captureTemplateAsync(
+        service: AccessibilityService,
+        bounds: Bounds,
+        onCaptured: (String?) -> Unit
+    ) {
+        captureExecutor.execute {
+            val path = try {
+                captureTemplate(service, bounds)
+            } catch (e: Exception) {
+                null
+            }
+            try {
+                onCaptured(path)
+            } catch (e: Exception) {
+                // A failing consumer must not kill the capture thread.
+            }
+        }
+    }
+
+    /** Deletes a staged template file. Safe to call with a null/unknown path. */
+    fun deleteTemplate(path: String?) {
+        if (path.isNullOrEmpty()) return
+        try {
+            File(path).delete()
+        } catch (e: Exception) {
+            // Best effort only.
+        }
+    }
+
+    /** Runs on [captureExecutor] only - it blocks. */
     private fun captureTemplate(service: AccessibilityService, bounds: Bounds): String? {
         if (screenCaptureManager.screenCapture?.available != true) {
-            // Requesting screen-capture permission involves awaiting an
-            // activity-result callback that runs on the main looper. We're
-            // called from the accessibility-event (main) thread, so blocking
-            // here would deadlock waiting on the very looper the callback
-            // needs. Kick off the request in the background instead and fall
-            // back to CLICK_BOUNDS for this tap; once granted, later taps use
-            // the real template path below.
-            CoroutineScope(Dispatchers.Default).launch {
-                try {
+            // Requesting screen-capture permission awaits an activity-result
+            // callback delivered on the main looper. We're on the capture
+            // thread (never the accessibility-event/main thread), so blocking
+            // here is safe. A request the user leaves unanswered holds up later
+            // captures on this single thread, which is what we want: those taps
+            // simply stay on their CLICK_BOUNDS fallback instead of stacking up
+            // permission prompts.
+            try {
+                runBlocking {
                     screenCaptureManager.requestScreenCapture(
                         service.applicationContext,
                         service.resources.configuration.orientation
                     )
-                } catch (e: Exception) {
-                    // Permission denied or request failed; the next qualifying
-                    // tap will simply retry the request.
                 }
+            } catch (e: Exception) {
+                // Permission denied or request failed; the next qualifying tap
+                // will simply retry the request.
+                return null
             }
-            return null
+            if (screenCaptureManager.screenCapture?.available != true) return null
         }
         return try {
             runBlocking {
