@@ -77,6 +77,17 @@ class AgentBubble(context: Context) {
      */
     @Volatile
     private var mVoiceSessionEpoch = 0
+
+    /**
+     * The script a voice turn is currently blocked on in [executeAction], or
+     * null when no turn is executing. The epoch above only invalidates
+     * *bookkeeping*; this handle is what makes Stop (and closing the bubble)
+     * able to kill the script that is physically driving the screen right
+     * now, rather than letting its click/scroll/fill land anyway and merely
+     * discarding the result afterwards.
+     */
+    @Volatile
+    private var mInFlightExecution: ScriptExecution? = null
     // Paddle's underlying Predictor does real native model-load work the
     // first time it's used (see ScreenStateReader's own doc comment on its
     // cached instance), so this reader is held for the bubble's lifetime
@@ -176,19 +187,36 @@ class AgentBubble(context: Context) {
                 // flight for it must not land its result later. See
                 // mVoiceSessionEpoch's doc comment.
                 mVoiceSessionEpoch++
-                finishSession(mVoiceSession.stop())
+                // The epoch alone would let a turn already blocked inside
+                // executeAction() run its script to completion and only then
+                // have its result dropped - so the tap/scroll/fill would
+                // still physically happen after Stop. Kill the script too.
+                forceStop(mInFlightExecution)
+                finishSession(mVoiceSession.stop(), optimize = false)
             }
             // Nothing active - don't optimize, generate, or show a "0
             // step(s) recorded" dialog for an accidental Stop tap.
         }
     }
 
-    private fun finishSession(actions: List<SemanticAction>) {
-        val optimized = ActionOptimizer.optimize(actions)
+    /**
+     * Converges the Record and voice paths on the same Preview/Save/Discard
+     * flow.
+     *
+     * [optimize] must be false for a voice session. ActionOptimizer merges
+     * consecutive scrolls, which is correct for Record - one physical fling
+     * emits many scroll accessibility events - but wrong here: each voice
+     * SCROLL is one separate spoken instruction that already executed once on
+     * screen and was appended to the session only after a confirmed success,
+     * so three spoken "scroll down"s must save as three steps, not one.
+     */
+    private fun finishSession(actions: List<SemanticAction>, optimize: Boolean = true) {
+        val kept = if (optimize) ActionOptimizer.optimize(actions) else actions
         // Templates belonging to steps the optimizer dropped can never be
-        // referenced again.
-        discardTemplates(actions.filterNot { optimized.contains(it) })
-        showSummaryDialog(optimized)
+        // referenced again. When nothing was optimized away, `kept` is
+        // `actions` itself and this drop-list is empty for free.
+        discardTemplates(actions.filterNot { kept.contains(it) })
+        showSummaryDialog(kept)
     }
 
     private fun stopAllScripts() {
@@ -274,41 +302,74 @@ class AgentBubble(context: Context) {
         // planning, or executing on the background thread below.
         val sessionEpoch = mVoiceSessionEpoch
         voiceTurnExecutor.execute {
-            val service = AccessibilityService.instance
-            if (service == null) {
+            // Nothing below may be allowed to throw out of this lambda. App
+            // installs a global CrashHandler that catches uncaught
+            // background-thread exceptions and uploads them to a remote crash
+            // service with no toast or dialog, so an unguarded failure here
+            // would make the turn vanish behind a "Thinking..." toast that
+            // never resolves - and could carry the API key off-device inside
+            // a stack trace. The most reachable trigger is OkHttp's
+            // addHeader(), which throws IllegalArgumentException on a key with
+            // a stray newline or any non-printable-ASCII character.
+            try {
+                // This turn may have been queued behind a slower one while the
+                // user tapped Stop. Bail before doing any describe / plan /
+                // execute work at all - see mVoiceSessionEpoch's doc comment.
+                if (mVoiceSessionEpoch != sessionEpoch) return@execute
+                val service = AccessibilityService.instance
+                if (service == null) {
+                    AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+                    return@execute
+                }
+                val screen = mScreenStateReader.describeScreen(service)
+                val action = mPlanner.plan(instruction, screen, Pref.getClaudeApiKey())
+                if (action == null) {
+                    AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+                    return@execute
+                }
+                // Describing the screen and the Claude round trip both take
+                // real time. Re-check before physically touching the screen,
+                // so a Stop during that window doesn't still perform an action.
+                if (mVoiceSessionEpoch != sessionEpoch) return@execute
+                val succeeded = executeAction(action)
+                if (mVoiceSessionEpoch != sessionEpoch) {
+                    // The session this turn belongs to was stopped, or a new one
+                    // started, while this turn was still in flight. Its result
+                    // is stale and must not be folded into whatever session is
+                    // live now - drop it silently rather than calling
+                    // addAction() or reporting on it.
+                    return@execute
+                }
+                if (succeeded) {
+                    mVoiceSession.addAction(action)
+                    AutoJs.getInstance().uiHandler.toast(
+                        mContext.getString(R.string.text_agent_action_performed, instruction)
+                    )
+                } else {
+                    val label = action.targetText ?: instruction
+                    AutoJs.getInstance().uiHandler.toast(
+                        mContext.getString(R.string.text_agent_target_not_found, label)
+                    )
+                }
+            } catch (e: InterruptedException) {
+                // close() interrupted this turn via shutdownNow(). The bubble
+                // is going away, so there is no longer anyone to report to -
+                // toasting here would surface a failure after the UI is gone.
+            } catch (e: Exception) {
                 AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
-                return@execute
-            }
-            val screen = mScreenStateReader.describeScreen(service)
-            val action = mPlanner.plan(instruction, screen, Pref.getClaudeApiKey())
-            if (action == null) {
-                AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
-                return@execute
-            }
-            val succeeded = executeAction(action)
-            if (mVoiceSessionEpoch != sessionEpoch) {
-                // The session this turn belongs to was stopped, or a new one
-                // started, while this turn was still in flight. Its result
-                // is stale and must not be folded into whatever session is
-                // live now - drop it silently rather than calling
-                // addAction() or reporting on it.
-                return@execute
-            }
-            if (succeeded) {
-                mVoiceSession.addAction(action)
-                AutoJs.getInstance().uiHandler.toast(
-                    mContext.getString(R.string.text_agent_action_performed, instruction)
-                )
-            } else {
-                val label = action.targetText ?: instruction
-                AutoJs.getInstance().uiHandler.toast(
-                    mContext.getString(R.string.text_agent_target_not_found, label)
-                )
             }
         }
     }
 
-    /** Runs [action] as a one-step script and blocks (on the calling background thread) for the result. */
+    /**
+     * Runs [action] as a one-step script and blocks (on the calling background
+     * thread) for the result.
+     *
+     * The returned [ScriptExecution] is published to [mInFlightExecution] for
+     * the duration of the call, and force-stopped here if the script blows
+     * past its own timeout: discarding the handle would leave a runaway script
+     * with no way to be killed, still touching the screen indefinitely.
+     */
     private fun executeAction(action: SemanticAction): Boolean {
         val script = ActionScriptGenerator.generate(listOf(action))
         val source = StringScriptSource("voice-turn", script)
@@ -326,11 +387,39 @@ class AgentBubble(context: Context) {
                 latch.countDown()
             }
         }
-        AutoJs.getInstance().scriptEngineService.execute(
+        val execution = AutoJs.getInstance().scriptEngineService.execute(
             source, listener, ExecutionConfig(workingDirectory = Pref.getScriptDirPath())
         )
-        latch.await(VOICE_TURN_EXECUTION_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        mInFlightExecution = execution
+        try {
+            if (!latch.await(VOICE_TURN_EXECUTION_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                // The script outlived even its own internal find timeout.
+                // Nothing else will ever stop it, so stop it here rather than
+                // returning and leaving it running on the device.
+                forceStop(execution)
+            }
+        } finally {
+            mInFlightExecution = null
+        }
         return succeeded
+    }
+
+    /**
+     * Best-effort force-stop of a running voice-turn script.
+     *
+     * [ScriptExecution] itself exposes no stop/cancel; forcing the engine to
+     * stop is the documented way to stop a script from another thread (see
+     * ScriptEngine's own KDoc), and is what the rest of this app already does.
+     * `engine` is null until the script thread has created one, so a turn
+     * stopped in its first instants simply has nothing to stop.
+     */
+    private fun forceStop(execution: ScriptExecution?) {
+        try {
+            execution?.engine?.forceStop()
+        } catch (e: Exception) {
+            // The script may have finished and destroyed its engine between
+            // the read above and this call; nothing left to stop either way.
+        }
     }
 
     private fun showSummaryDialog(actions: List<SemanticAction>) {
@@ -555,7 +644,13 @@ class AgentBubble(context: Context) {
     fun close() {
         mSpeechRecognizer?.destroy()
         mSpeechRecognizer = null
-        voiceTurnExecutor.shutdown()
+        // A turn still in flight when the bubble closes has no bubble left to
+        // report into: flag it stale (see mVoiceSessionEpoch), kill the script
+        // it may have driving the screen, and interrupt the executor rather
+        // than letting shutdown() drain its queue to completion.
+        mVoiceSessionEpoch++
+        forceStop(mInFlightExecution)
+        voiceTurnExecutor.shutdownNow()
         // The recorder is a process-wide singleton: hiding the bubble mid
         // recording would otherwise leave it recording forever into a list
         // nobody drains.

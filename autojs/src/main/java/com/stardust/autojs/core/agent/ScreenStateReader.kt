@@ -27,11 +27,12 @@ class ScreenStateReader {
     private var templateDir: File? = null
 
     /**
-     * Shared OCR instance for [ocrFallback]. `Paddle`'s underlying `Predictor`
-     * does real native model-load work the first time it's used, so this is
-     * cached rather than constructed fresh per call - a fresh instance per
-     * voice turn would pay a full model-load cost on every OCR fallback, not
-     * just an inference cost.
+     * Shared OCR instance for [ocrFallback], which is currently disabled - so
+     * nothing reaches this at the moment. `Paddle`'s underlying `Predictor`
+     * does its real native model-load work on first *use*, not on
+     * construction, so holding an unused instance costs nothing; it is cached
+     * rather than constructed per call so that re-enabling OCR doesn't pay a
+     * full model load on every voice turn instead of just an inference cost.
      */
     private val paddle = Paddle()
 
@@ -189,17 +190,31 @@ class ScreenStateReader {
 
     /**
      * Everything visible right now, for the voice agent to reason over: every
-     * accessibility node's text/content-description with its bounds, plus
-     * (when screen-capture is already available - this never prompts for it)
-     * whole-screen OCR text, unconditionally appended alongside the
-     * accessibility-sourced list. OCR is a best-effort additional text source,
-     * not an exclusive fallback limited to unlabeled widgets - it is not
-     * scoped to regions the accessibility walk missed, so an already-labeled
-     * widget's text may also show up a second time via OCR, with no
-     * deduplication between the two sources. Call off the main thread: OCR on
-     * a full screenshot is not fast enough to run on the accessibility-event
-     * thread, the same reason template capture already runs on
-     * [captureExecutor].
+     * accessibility node's text or content-description, with its bounds.
+     *
+     * The OCR pass ([ocrFallback]) is deliberately **disabled** in this
+     * version, for three reasons:
+     *
+     *  1. It didn't work. OCR-sourced entries were tagged [MatchBy.TEXT], but
+     *     an OCR-only target has no accessibility `getText()` /
+     *     `getContentDescription()` for the generated script's
+     *     `__findTextNear` / `__findDescNear` selectors to match against at
+     *     execution time - so an OCR-matched action always burned its full
+     *     10s find timeout and then failed, defeating the point of the
+     *     fallback. Making these targets actionable needs CLICK_BOUNDS
+     *     routing for label-less targets, which does not exist yet;
+     *     **re-enabling OCR requires building that routing first.**
+     *  2. Each call captured a full-screen bitmap (and its native Mat) that
+     *     was never recycled, leaking memory on every OCR-triggering turn.
+     *  3. It appended an unbounded number of extra entries to the prompt.
+     *
+     * The accepted consequence is that targets which are readable on screen
+     * but carry no accessibility label are not voice-addressable in this
+     * version.
+     *
+     * Still call off the main thread: the accessibility walk is not work for
+     * the accessibility-event thread, the same reason template capture
+     * already runs on [captureExecutor].
      */
     fun describeScreen(service: AccessibilityService): ScreenDescription {
         val root = service.rootInActiveWindow
@@ -208,7 +223,6 @@ class ScreenStateReader {
         val visible = mutableListOf<VisibleText>()
         collectVisibleText(root, visible)
         root.recycle()
-        visible.addAll(ocrFallback())
         return ScreenDescription(screenBounds, visible)
     }
 
@@ -230,11 +244,22 @@ class ScreenStateReader {
     }
 
     /**
-     * Best-effort text for labels with no accessible text/description. Never
-     * requests screen-capture permission - that belongs to an explicit user
-     * action (recording an unlabeled tap), not a side effect of speaking an
-     * instruction. Returns nothing if permission isn't already available.
+     * **Currently unused.** [describeScreen] no longer calls this; see its doc
+     * comment for why OCR is disabled and what has to be built before it can
+     * be switched back on. Kept, rather than deleted, so re-enabling it is a
+     * one-line change once CLICK_BOUNDS routing exists for label-less targets.
+     *
+     * When it was live it returned whole-screen OCR text unioned into
+     * [describeScreen]'s accessibility-sourced list - not, despite an earlier
+     * version of this comment, a gated fallback scoped to unlabeled widgets:
+     * it was unconditional and undeduplicated, so an already-labeled widget's
+     * text could appear twice. It never requests screen-capture permission -
+     * that belongs to an explicit user action (recording an unlabeled tap),
+     * not a side effect of speaking an instruction - and returns nothing if
+     * permission isn't already available. Note it also does not recycle the
+     * bitmap it captures (finding 4b); that must be fixed before re-enabling.
      */
+    @Suppress("unused")
     private fun ocrFallback(): List<VisibleText> {
         val capturer = screenCaptureManager.screenCapture?.takeIf { it.available } ?: return emptyList()
         return try {

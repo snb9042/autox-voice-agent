@@ -168,7 +168,13 @@ public class Pref {
     }
 
     public static String getClaudeApiKey() {
-        return def().getString(getString(R.string.key_claude_api_key), "");
+        // Trimmed because a key pasted in from a web page commonly carries a
+        // trailing newline, and OkHttp's addHeader() throws
+        // IllegalArgumentException on any leading/trailing whitespace or
+        // non-printable-ASCII character in a header value. Trimming here also
+        // makes a whitespace-only value read as blank to callers that check
+        // whether a key is configured at all.
+        return def().getString(getString(R.string.key_claude_api_key), "").trim();
     }
 
     public static String getCurrentTheme() {

@@ -33,6 +33,28 @@ class VoiceAgentSessionTest {
     }
 
     @Test
+    fun `addAction is ignored while still idle`() {
+        val session = VoiceAgentSession()
+        session.addAction(action)
+        // Not start()ed in between: start() clears, which would mask the
+        // guard. Reading straight back out is what proves nothing landed.
+        assertTrue(session.stop().isEmpty())
+    }
+
+    @Test
+    fun `addAction is ignored after stop, so a stopped session cannot grow`() {
+        // A voice turn's work runs on a background thread and can resolve
+        // after the user has already tapped Stop; the list stop() handed back
+        // must not gain a step behind the caller's back.
+        val session = VoiceAgentSession()
+        session.start()
+        session.addAction(action)
+        assertEquals(listOf(action), session.stop())
+        session.addAction(action.copy(targetText = "Late"))
+        assertEquals(listOf(action), session.stop())
+    }
+
+    @Test
     fun `starting again after a stop clears the previous session's actions`() {
         val session = VoiceAgentSession()
         session.start()

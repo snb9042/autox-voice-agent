@@ -81,6 +81,24 @@ class ClaudeActionPlannerTest {
     }
 
     @Test
+    fun `a fill with no value is rejected rather than blanking the field`() {
+        // An empty-string fill would *succeed* at execution time - wiping the
+        // target field - and then be saved as a successful step.
+        val response = toolUseResponse(
+            JSONObject().put("action", "fill_desc").put("target", "Email").put("reason", "fill the email field")
+        )
+        assertNull(ClaudeActionPlanner.parseResponse(response, screen))
+    }
+
+    @Test
+    fun `a fill with an explicitly empty value is rejected too`() {
+        val response = toolUseResponse(
+            JSONObject().put("action", "fill_text").put("target", "Login").put("value", "").put("reason", "fill it")
+        )
+        assertNull(ClaudeActionPlanner.parseResponse(response, screen))
+    }
+
+    @Test
     fun `wait_for_text produces a WAIT action`() {
         val response = toolUseResponse(
             JSONObject().put("action", "wait_for_text").put("target", "Login").put("reason", "waiting for the page")

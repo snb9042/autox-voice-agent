@@ -7,7 +7,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
-import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 data class VisibleText(val text: String, val matchBy: MatchBy, val bounds: Bounds)
@@ -24,24 +23,36 @@ class ClaudeActionPlanner(
     /**
      * One Claude call: given what's currently visible and one spoken
      * instruction, returns the single action Claude chose, or null if Claude
-     * couldn't determine one, the HTTP call failed, or the response didn't
-     * match the expected shape. Blocking - call off the main thread.
+     * couldn't determine one, the request couldn't even be built (a malformed
+     * api key), the HTTP call failed, or the response didn't match the
+     * expected shape. Never throws. Blocking - call off the main thread.
      */
     fun plan(instruction: String, screen: ScreenDescription, apiKey: String): SemanticAction? {
-        val request = Request.Builder()
-            .url(API_URL)
-            .addHeader("x-api-key", apiKey)
-            .addHeader("anthropic-version", API_VERSION)
-            .addHeader("content-type", "application/json")
-            .post(buildRequestBody(instruction, screen).toString().toRequestBody(JSON_MEDIA_TYPE))
-            .build()
         return try {
+            // Request building is inside the try on purpose: addHeader()
+            // throws IllegalArgumentException on an api key containing
+            // whitespace or any non-printable-ASCII character, and that must
+            // be reported as "no action" like any other failure rather than
+            // propagate out of this method.
+            val request = Request.Builder()
+                .url(API_URL)
+                .addHeader("x-api-key", apiKey)
+                .addHeader("anthropic-version", API_VERSION)
+                .addHeader("content-type", "application/json")
+                .post(buildRequestBody(instruction, screen).toString().toRequestBody(JSON_MEDIA_TYPE))
+                .build()
             httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return null
                 val body = response.body?.string() ?: return null
                 parseResponse(body, screen)
             }
-        } catch (e: IOException) {
+        } catch (e: Exception) {
+            // Deliberately broader than IOException: building the request can
+            // fail too - addHeader() throws IllegalArgumentException on a key
+            // with whitespace or non-printable-ASCII characters in it - and
+            // this method's contract is to return null on any failure rather
+            // than propagate to a caller running on a background thread where
+            // the global crash handler would swallow it.
             null
         }
     }
@@ -151,11 +162,18 @@ class ClaudeActionPlanner(
                         targetText = it.text, matchBy = it.matchBy, isLongClick = true
                     )
                 }
-                "fill_text", "fill_desc" -> matched?.let {
-                    SemanticAction(
-                        ActionType.FILL_TEXT, it.bounds,
-                        targetText = it.text, matchBy = it.matchBy, fillValue = input.optString("value")
-                    )
+                "fill_text", "fill_desc" -> {
+                    // optString returns "" for an omitted value, and an
+                    // empty-string fill *succeeds* - it blanks the target
+                    // field and then gets saved as a successful step. Treat a
+                    // valueless fill as an action Claude couldn't determine.
+                    val value = input.optString("value").takeIf { it.isNotEmpty() }
+                    if (value == null) null else matched?.let {
+                        SemanticAction(
+                            ActionType.FILL_TEXT, it.bounds,
+                            targetText = it.text, matchBy = it.matchBy, fillValue = value
+                        )
+                    }
                 }
                 "wait_for_text", "wait_for_desc" -> matched?.let {
                     SemanticAction(ActionType.WAIT, it.bounds, targetText = it.text, matchBy = it.matchBy)
