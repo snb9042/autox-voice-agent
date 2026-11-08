@@ -27,6 +27,15 @@ class ScreenStateReader {
     private var templateDir: File? = null
 
     /**
+     * Shared OCR instance for [ocrFallback]. `Paddle`'s underlying `Predictor`
+     * does real native model-load work the first time it's used, so this is
+     * cached rather than constructed fresh per call - a fresh instance per
+     * voice turn would pay a full model-load cost on every OCR fallback, not
+     * just an inference cost.
+     */
+    private val paddle = Paddle()
+
+    /**
      * Single background thread for all screen-capture work. Everything here is
      * called from the accessibility-event (main) thread, and capturing /
      * cropping / saving a bitmap - let alone awaiting the screen-capture
@@ -180,10 +189,15 @@ class ScreenStateReader {
 
     /**
      * Everything visible right now, for the voice agent to reason over: every
-     * accessibility node's text/content-description with its bounds, plus (when
-     * screen-capture is already available - this never prompts for it) OCR text
-     * for labels with no accessible text. Call off the main thread: OCR on a
-     * full screenshot is not fast enough to run on the accessibility-event
+     * accessibility node's text/content-description with its bounds, plus
+     * (when screen-capture is already available - this never prompts for it)
+     * whole-screen OCR text, unconditionally appended alongside the
+     * accessibility-sourced list. OCR is a best-effort additional text source,
+     * not an exclusive fallback limited to unlabeled widgets - it is not
+     * scoped to regions the accessibility walk missed, so an already-labeled
+     * widget's text may also show up a second time via OCR, with no
+     * deduplication between the two sources. Call off the main thread: OCR on
+     * a full screenshot is not fast enough to run on the accessibility-event
      * thread, the same reason template capture already runs on
      * [captureExecutor].
      */
@@ -226,7 +240,7 @@ class ScreenStateReader {
         return try {
             runBlocking {
                 val screen = capturer.captureImageWrapper() ?: return@runBlocking emptyList()
-                Paddle().ocr(screen).map {
+                paddle.ocr(screen).map {
                     VisibleText(it.text, MatchBy.TEXT, Bounds.fromRect(it.bounds))
                 }
             }
