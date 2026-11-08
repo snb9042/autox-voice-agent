@@ -130,4 +130,18 @@ class ClaudeActionPlannerTest {
         val response = JSONObject().put("content", org.json.JSONArray()).toString()
         assertNull(ClaudeActionPlanner.parseResponse(response, screen))
     }
+
+    @Test
+    fun `a response whose content array contains non-object elements returns null gracefully`() {
+        val response = JSONObject()
+            .put("content", org.json.JSONArray().put("not an object").put(123).put(true))
+            .toString()
+        assertNull(ClaudeActionPlanner.parseResponse(response, screen))
+    }
+
+    @Test
+    fun `a response with invalid JSON returns null gracefully`() {
+        val invalidJson = "{ broken json without closing"
+        assertNull(ClaudeActionPlanner.parseResponse(invalidJson, screen))
+    }
 }

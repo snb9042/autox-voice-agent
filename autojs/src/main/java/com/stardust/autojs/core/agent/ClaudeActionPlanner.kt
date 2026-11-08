@@ -5,6 +5,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -121,14 +122,18 @@ class ClaudeActionPlanner(
 
         /** Pure, independently testable: Claude's response JSON -> one SemanticAction, or null. */
         fun parseResponse(responseBody: String, screen: ScreenDescription): SemanticAction? {
-            val content = JSONObject(responseBody).optJSONArray("content") ?: return null
-            for (i in 0 until content.length()) {
-                val block = content.getJSONObject(i)
-                if (block.optString("type") != "tool_use") continue
-                val input = block.optJSONObject("input") ?: return null
-                return actionFromInput(input, screen)
+            return try {
+                val content = JSONObject(responseBody).optJSONArray("content") ?: return null
+                for (i in 0 until content.length()) {
+                    val block = content.optJSONObject(i) ?: continue
+                    if (block.optString("type") != "tool_use") continue
+                    val input = block.optJSONObject("input") ?: return null
+                    return actionFromInput(input, screen)
+                }
+                null
+            } catch (e: JSONException) {
+                null
             }
-            return null
         }
 
         private fun actionFromInput(input: JSONObject, screen: ScreenDescription): SemanticAction? {
