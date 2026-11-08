@@ -59,6 +59,24 @@ class AgentBubble(context: Context) {
     private val mRecorder: SemanticRecorder = AutoJs.getInstance().semanticRecorder
     private val mVoiceSession = VoiceAgentSession()
     private val mPlanner = ClaudeActionPlanner()
+
+    /**
+     * Identifies which voice session is "current", separately from
+     * [VoiceAgentSession.state]. [VoiceAgentSession.stop] snapshots and
+     * returns its actions but does not clear its internal list - only
+     * [VoiceAgentSession.start] does - and a turn's describe+plan+execute
+     * work can still be in flight on [voiceTurnExecutor] after the user taps
+     * Stop (or taps Talk again, which restarts the session for a new one).
+     * Without this, a stray turn resolving after its session has already
+     * been stopped/restarted would call [VoiceAgentSession.addAction] on
+     * whichever session is live *now*, silently folding an action from a
+     * finished or unrelated session into one the user never spoke it into.
+     * Bumped every time the voice session's identity changes (start or
+     * stop); a turn captures the value before being dispatched and checks it
+     * again once it resolves, dropping its result if the value moved on.
+     */
+    @Volatile
+    private var mVoiceSessionEpoch = 0
     // Paddle's underlying Predictor does real native model-load work the
     // first time it's used (see ScreenStateReader's own doc comment on its
     // cached instance), so this reader is held for the bubble's lifetime
@@ -154,6 +172,10 @@ class AgentBubble(context: Context) {
                 finishSession(actions)
             }
             mVoiceSession.state == VoiceAgentSession.State.ACTIVE -> {
+                // This session's identity ends here - any turn still in
+                // flight for it must not land its result later. See
+                // mVoiceSessionEpoch's doc comment.
+                mVoiceSessionEpoch++
                 finishSession(mVoiceSession.stop())
             }
             // Nothing active - don't optimize, generate, or show a "0
@@ -198,6 +220,9 @@ class AgentBubble(context: Context) {
             return
         }
         if (mVoiceSession.state != VoiceAgentSession.State.ACTIVE) {
+            // A new session identity starts here too - see
+            // mVoiceSessionEpoch's doc comment.
+            mVoiceSessionEpoch++
             mVoiceSession.start()
         }
         listenForInstruction()
@@ -243,6 +268,11 @@ class AgentBubble(context: Context) {
     /** Runs the describe-plan-execute sequence on [voiceTurnExecutor]. */
     private fun runVoiceTurn(instruction: String) {
         AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_thinking))
+        // Captured on the main thread, before this turn is handed off - see
+        // mVoiceSessionEpoch's doc comment. Stop (or a fresh Talk tap) can
+        // end/replace this session while this turn is still describing,
+        // planning, or executing on the background thread below.
+        val sessionEpoch = mVoiceSessionEpoch
         voiceTurnExecutor.execute {
             val service = AccessibilityService.instance
             if (service == null) {
@@ -256,6 +286,14 @@ class AgentBubble(context: Context) {
                 return@execute
             }
             val succeeded = executeAction(action)
+            if (mVoiceSessionEpoch != sessionEpoch) {
+                // The session this turn belongs to was stopped, or a new one
+                // started, while this turn was still in flight. Its result
+                // is stale and must not be folded into whatever session is
+                // live now - drop it silently rather than calling
+                // addAction() or reporting on it.
+                return@execute
+            }
             if (succeeded) {
                 mVoiceSession.addAction(action)
                 AutoJs.getInstance().uiHandler.toast(
