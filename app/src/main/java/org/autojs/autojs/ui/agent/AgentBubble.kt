@@ -8,6 +8,8 @@ import android.view.ContextThemeWrapper
 import android.view.View
 import android.widget.ScrollView
 import android.widget.TextView
+import com.afollestad.materialdialogs.DialogAction
+import com.afollestad.materialdialogs.MaterialDialog
 import com.makeramen.roundedimageview.RoundedImageView
 import com.stardust.app.DialogUtils
 import com.stardust.autojs.core.agent.ActionOptimizer
@@ -174,33 +176,89 @@ class AgentBubble(context: Context) {
      */
     private fun promptSaveScript(actions: List<SemanticAction>) {
         var saved = false
-        DialogUtils.showDialog(
-            ThemeColorMaterialDialogBuilder(mContext)
-                .title(R.string.text_name)
-                .inputType(InputType.TYPE_CLASS_TEXT)
-                .input(mContext.getString(R.string.text_please_input_name), "", false) { _, _ -> }
-                .onPositive { dialog, _ ->
-                    // Path separators would move the script out of the
-                    // directory its templates were copied into, breaking the
-                    // relative template references.
-                    val name = dialog.inputEditText?.text?.toString()?.trim()
-                        ?.replace(PATH_SEPARATORS, "_")
-                        .orEmpty()
-                    if (name.isNotEmpty()) {
-                        saveScript(name, actions)
+        var saveAttemptFailed = false
+        val dialog = ThemeColorMaterialDialogBuilder(mContext)
+            .title(R.string.text_name)
+            .inputType(InputType.TYPE_CLASS_TEXT)
+            // Without this the input callback fires only once, so the
+            // collision check below would never see what the user typed.
+            .alwaysCallInputCallback()
+            .input(mContext.getString(R.string.text_please_input_name), "", false) { dialog, input ->
+                validateScriptName(dialog, input)
+            }
+            .onPositive { dialog, _ ->
+                val fileName = scriptFileNameFor(dialog.inputEditText?.text?.toString().orEmpty())
+                when {
+                    // Should be unreachable - the positive button is disabled
+                    // for a blank name - but a blank submit must not be
+                    // mistaken for a cancel and take the recording with it.
+                    fileName == null -> saveAttemptFailed = true
+                    saveScript(fileName, actions) -> {
                         saved = true
+                        // The staged originals have been copied next to the
+                        // script; their only reference now is the relocated one.
+                        discardTemplates(actions)
                     }
+                    // The write didn't happen. Keep the staged templates so the
+                    // recording stays recoverable rather than destroying it on
+                    // a failed save.
+                    else -> saveAttemptFailed = true
                 }
-                .negativeText(R.string.text_cancel)
-                .dismissListener {
-                    // Declining to save means the staged templates are garbage.
-                    if (!saved) discardTemplates(actions)
-                }
-                .build()
-        )
+            }
+            .negativeText(R.string.text_cancel)
+            .dismissListener {
+                // Declining to save means the staged templates are garbage.
+                // A save that was attempted and failed is *not* a decline, so
+                // it must not take the recording down with it.
+                if (!saved && !saveAttemptFailed) discardTemplates(actions)
+            }
+            .build()
+        // Run the validator once up front so the button starts out disabled for
+        // the empty prefill, rather than relying on the dialog library to do it.
+        validateScriptName(dialog, dialog.inputEditText?.text ?: "")
+        DialogUtils.showDialog(dialog)
     }
 
-    private fun saveScript(name: String, actions: List<SemanticAction>) {
+    /**
+     * Keeps the positive button (and so submitting at all) disabled unless the
+     * typed name is non-blank and doesn't collide with an existing file -
+     * mirroring ScriptOperations.validateInput, whose protection was lost when
+     * this feature took over the name prompt.
+     */
+    private fun validateScriptName(dialog: MaterialDialog, input: CharSequence) {
+        val editText = dialog.inputEditText ?: return
+        val positiveButton = dialog.getActionButton(DialogAction.POSITIVE)
+        val fileName = scriptFileNameFor(input.toString())
+        if (fileName == null) {
+            // Blank: just don't let it through, no error text needed.
+            positiveButton?.isEnabled = false
+            return
+        }
+        if (File(Pref.getScriptDirPath(), fileName).exists()) {
+            editText.error = mContext.getString(R.string.text_file_exists)
+            positiveButton?.isEnabled = false
+        } else {
+            editText.error = null
+            positiveButton?.isEnabled = true
+        }
+    }
+
+    /**
+     * The script file name a raw input would be saved under, or null if the
+     * input is blank. Shared by the input validator and the save itself so the
+     * name that gets checked is always the name that gets written.
+     *
+     * Path separators would move the script out of the directory its templates
+     * were copied into, breaking the relative template references.
+     */
+    private fun scriptFileNameFor(input: String): String? {
+        val name = input.trim().replace(PATH_SEPARATORS, "_")
+        if (name.isEmpty()) return null
+        return if (name.endsWith(".js", ignoreCase = true)) name else "$name.js"
+    }
+
+    /** Returns true only if the script file was actually written to disk. */
+    private fun saveScript(fileName: String, actions: List<SemanticAction>): Boolean {
         // ScriptOperations(context, null) targets Pref.getScriptDirPath(), so
         // that's the directory the script - and therefore its templates - lands
         // in. Templates are copied next to the script and referenced by bare
@@ -208,14 +266,20 @@ class AgentBubble(context: Context) {
         // directory; an absolute filesDir path would break on export/share and
         // on clearing app data.
         val scriptDir = File(Pref.getScriptDirPath())
+        val target = File(scriptDir, fileName)
+        // The dialog already refuses colliding names, but the file could have
+        // appeared since the last keystroke - and createScriptFile would then
+        // write nothing while leaving the pre-existing file in place, which the
+        // post-write existence check below cannot tell from a success.
+        if (target.exists()) return false
         val relocated = actions.map { action ->
             val staged = action.imageTemplatePath
             if (action.type != ActionType.CLICK_IMAGE || staged.isNullOrEmpty()) {
                 action
             } else {
-                val fileName = copyTemplateInto(scriptDir, staged)
-                if (fileName != null) {
-                    action.copy(imageTemplatePath = fileName)
+                val templateFileName = copyTemplateInto(scriptDir, staged)
+                if (templateFileName != null) {
+                    action.copy(imageTemplatePath = templateFileName)
                 } else {
                     // Template lost; degrade to the fixed-coordinate fallback
                     // rather than emitting a step that can never load.
@@ -224,11 +288,10 @@ class AgentBubble(context: Context) {
             }
         }
         val script = ActionScriptGenerator.generate(relocated)
-        val fileName = if (name.endsWith(".js", ignoreCase = true)) name else "$name.js"
-        ScriptOperations(mContext, null).createScriptFile(File(scriptDir, fileName).path, script, false)
-        // The staged originals have been copied; their only reference now is
-        // the relocated one.
-        discardTemplates(actions)
+        // createScriptFile is void and only toasts on failure, so the only way
+        // to know whether the write actually happened is to look.
+        ScriptOperations(mContext, null).createScriptFile(target.path, script, false)
+        return target.isFile
     }
 
     private fun copyTemplateInto(dir: File, stagedPath: String): String? = try {
