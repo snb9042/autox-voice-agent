@@ -48,4 +48,15 @@
         android:padding="8dp"
         android:src="@drawable/ic_close" />
 
+    <ImageView
+        android:id="@+id/agent_talk"
+        android:layout_width="42dp"
+        android:layout_height="42dp"
+        android:layout_gravity="center"
+        android:background="@drawable/circle_blue"
+        android:contentDescription="@string/text_agent_talk"
+        android:foreground="?selectableItemBackgroundBorderless"
+        android:padding="8dp"
+        android:src="@drawable/ic_mic" />
+
 </org.autojs.autojs.ui.floating.CircularActionMenu>

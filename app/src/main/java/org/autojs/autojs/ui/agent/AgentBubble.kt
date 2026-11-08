@@ -3,6 +3,10 @@ package org.autojs.autojs.ui.agent
 import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.text.InputType
 import android.view.ContextThemeWrapper
 import android.view.View
@@ -15,10 +19,19 @@ import com.stardust.app.DialogUtils
 import com.stardust.autojs.core.agent.ActionOptimizer
 import com.stardust.autojs.core.agent.ActionScriptGenerator
 import com.stardust.autojs.core.agent.ActionType
+import com.stardust.autojs.core.agent.ClaudeActionPlanner
+import com.stardust.autojs.core.agent.ScreenStateReader
 import com.stardust.autojs.core.agent.SemanticAction
 import com.stardust.autojs.core.agent.SemanticRecorder
+import com.stardust.autojs.core.agent.VoiceAgentSession
+import com.stardust.autojs.core.permission.Permissions
+import com.stardust.autojs.execution.ExecutionConfig
+import com.stardust.autojs.execution.ScriptExecution
+import com.stardust.autojs.execution.ScriptExecutionListener
+import com.stardust.autojs.script.StringScriptSource
 import com.stardust.autojs.util.FloatingPermission
 import com.stardust.enhancedfloaty.FloatyService
+import com.stardust.view.accessibility.AccessibilityService
 import org.autojs.autojs.Pref
 import org.autojs.autojs.autojs.AutoJs
 import org.autojs.autojs.model.explorer.ExplorerDirPage
@@ -33,6 +46,10 @@ import org.autojs.autojs.ui.floating.CircularMenuFloaty
 import org.autojs.autojs.ui.floating.CircularMenuWindow
 import org.autojs.autoxjs.R
 import java.io.File
+import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class AgentBubble(context: Context) {
 
@@ -40,6 +57,25 @@ class AgentBubble(context: Context) {
     private var mWindow: CircularMenuWindow? = null
     private var mIcon: RoundedImageView? = null
     private val mRecorder: SemanticRecorder = AutoJs.getInstance().semanticRecorder
+    private val mVoiceSession = VoiceAgentSession()
+    private val mPlanner = ClaudeActionPlanner()
+    // Paddle's underlying Predictor does real native model-load work the
+    // first time it's used (see ScreenStateReader's own doc comment on its
+    // cached instance), so this reader is held for the bubble's lifetime
+    // rather than constructed fresh per voice turn.
+    private val mScreenStateReader = ScreenStateReader()
+    private var mSpeechRecognizer: SpeechRecognizer? = null
+
+    /**
+     * One voice turn (screen description + the Claude call + running the
+     * resulting script) is network- and OCR-bound and must never run on the
+     * main thread - the same reasoning that already keeps template capture
+     * off it in ScreenStateReader. Single-threaded so overlapping turns (a
+     * second mic tap before the first finishes) queue rather than race.
+     */
+    private val voiceTurnExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "agent-voice-turn").apply { isDaemon = true }
+    }
 
     init {
         initFloaty()
@@ -70,10 +106,11 @@ class AgentBubble(context: Context) {
                         null
                     ) as CircularActionMenu
                     menu.findViewById<View>(R.id.agent_record)?.setOnClickListener { startRecording() }
-                    menu.findViewById<View>(R.id.agent_stop)?.setOnClickListener { stopRecording() }
+                    menu.findViewById<View>(R.id.agent_stop)?.setOnClickListener { stopActive() }
                     menu.findViewById<View>(R.id.agent_play)?.setOnClickListener { pickAndPlay() }
                     menu.findViewById<View>(R.id.agent_stop_all_scripts)
                         ?.setOnClickListener { stopAllScripts() }
+                    menu.findViewById<View>(R.id.agent_talk)?.setOnClickListener { startVoiceTurn() }
                     return menu
                 }
             }
@@ -95,8 +132,11 @@ class AgentBubble(context: Context) {
     private fun startRecording() {
         mWindow?.collapse()
         // Starting again would clear the in-progress recording, silently
-        // discarding everything captured so far.
+        // discarding everything captured so far. A voice turn and a
+        // recording must not run concurrently either - they'd both be
+        // writing into the picture of "what happened this session".
         if (mRecorder.state == SemanticRecorder.State.RECORDING) return
+        if (mVoiceSession.state == VoiceAgentSession.State.ACTIVE) return
         if (!AccessibilityServiceTool.isAccessibilityServiceEnabled(mContext)) {
             AccessibilityServiceTool.goToAccessibilitySetting()
             return
@@ -105,13 +145,23 @@ class AgentBubble(context: Context) {
         updateIcon()
     }
 
-    private fun stopRecording() {
+    private fun stopActive() {
         mWindow?.collapse()
-        // Nothing to stop - don't optimize, generate, or show a "0 step(s)
-        // recorded" dialog for an accidental Stop tap.
-        if (mRecorder.state != SemanticRecorder.State.RECORDING) return
-        val actions = mRecorder.stop()
-        updateIcon()
+        when {
+            mRecorder.state == SemanticRecorder.State.RECORDING -> {
+                val actions = mRecorder.stop()
+                updateIcon()
+                finishSession(actions)
+            }
+            mVoiceSession.state == VoiceAgentSession.State.ACTIVE -> {
+                finishSession(mVoiceSession.stop())
+            }
+            // Nothing active - don't optimize, generate, or show a "0
+            // step(s) recorded" dialog for an accidental Stop tap.
+        }
+    }
+
+    private fun finishSession(actions: List<SemanticAction>) {
         val optimized = ActionOptimizer.optimize(actions)
         // Templates belonging to steps the optimizer dropped can never be
         // referenced again.
@@ -122,6 +172,127 @@ class AgentBubble(context: Context) {
     private fun stopAllScripts() {
         mWindow?.collapse()
         AutoJs.getInstance().scriptEngineService.stopAllAndToast()
+    }
+
+    private fun startVoiceTurn() {
+        mWindow?.collapse()
+        // A recording and a voice turn must not run concurrently (see
+        // startRecording's guard). A second mic tap while one recognizer is
+        // already listening would leave two live recognizers competing for
+        // the mic, so block on that too - a second tap while a turn is only
+        // *thinking* (mSpeechRecognizer already null, back on the executor)
+        // is fine and queues behind it.
+        if (mRecorder.state == SemanticRecorder.State.RECORDING) return
+        if (mSpeechRecognizer != null) return
+        if (!AccessibilityServiceTool.isAccessibilityServiceEnabled(mContext)) {
+            AccessibilityServiceTool.goToAccessibilitySetting()
+            return
+        }
+        if (Pref.getClaudeApiKey().isBlank()) {
+            AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_api_key))
+            return
+        }
+        val missing = Permissions.getPermissionsNeedToRequest(mContext, arrayOf("RECORD_AUDIO"))
+        if (missing.isNotEmpty()) {
+            Permissions.requestPermissions(mContext, missing)
+            return
+        }
+        if (mVoiceSession.state != VoiceAgentSession.State.ACTIVE) {
+            mVoiceSession.start()
+        }
+        listenForInstruction()
+    }
+
+    /** Must be called on the main thread - SpeechRecognizer requires it. */
+    private fun listenForInstruction() {
+        AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_listening))
+        val recognizer = SpeechRecognizer.createSpeechRecognizer(mContext).also { mSpeechRecognizer = it }
+        recognizer.setRecognitionListener(object : RecognitionListener {
+            override fun onResults(results: Bundle) {
+                recognizer.destroy()
+                mSpeechRecognizer = null
+                val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                if (text.isNullOrBlank()) {
+                    AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_speech))
+                } else {
+                    runVoiceTurn(text)
+                }
+            }
+
+            override fun onError(error: Int) {
+                recognizer.destroy()
+                mSpeechRecognizer = null
+                AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_speech))
+            }
+
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+        }
+        recognizer.startListening(intent)
+    }
+
+    /** Runs the describe-plan-execute sequence on [voiceTurnExecutor]. */
+    private fun runVoiceTurn(instruction: String) {
+        AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_thinking))
+        voiceTurnExecutor.execute {
+            val service = AccessibilityService.instance
+            if (service == null) {
+                AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+                return@execute
+            }
+            val screen = mScreenStateReader.describeScreen(service)
+            val action = mPlanner.plan(instruction, screen, Pref.getClaudeApiKey())
+            if (action == null) {
+                AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+                return@execute
+            }
+            val succeeded = executeAction(action)
+            if (succeeded) {
+                mVoiceSession.addAction(action)
+                AutoJs.getInstance().uiHandler.toast(
+                    mContext.getString(R.string.text_agent_action_performed, instruction)
+                )
+            } else {
+                val label = action.targetText ?: instruction
+                AutoJs.getInstance().uiHandler.toast(
+                    mContext.getString(R.string.text_agent_target_not_found, label)
+                )
+            }
+        }
+    }
+
+    /** Runs [action] as a one-step script and blocks (on the calling background thread) for the result. */
+    private fun executeAction(action: SemanticAction): Boolean {
+        val script = ActionScriptGenerator.generate(listOf(action))
+        val source = StringScriptSource("voice-turn", script)
+        val latch = CountDownLatch(1)
+        var succeeded = false
+        val listener = object : ScriptExecutionListener {
+            override fun onStart(execution: ScriptExecution) {}
+            override fun onSuccess(execution: ScriptExecution, result: Any?) {
+                succeeded = true
+                latch.countDown()
+            }
+
+            override fun onException(execution: ScriptExecution, e: Throwable) {
+                succeeded = false
+                latch.countDown()
+            }
+        }
+        AutoJs.getInstance().scriptEngineService.execute(
+            source, listener, ExecutionConfig(workingDirectory = Pref.getScriptDirPath())
+        )
+        latch.await(VOICE_TURN_EXECUTION_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        return succeeded
     }
 
     private fun showSummaryDialog(actions: List<SemanticAction>) {
@@ -344,6 +515,9 @@ class AgentBubble(context: Context) {
     }
 
     fun close() {
+        mSpeechRecognizer?.destroy()
+        mSpeechRecognizer = null
+        voiceTurnExecutor.shutdown()
         // The recorder is a process-wide singleton: hiding the bubble mid
         // recording would otherwise leave it recording forever into a list
         // nobody drains.
@@ -362,6 +536,13 @@ class AgentBubble(context: Context) {
     companion object {
         private const val TEMPLATE_STAGING_DIR_NAME = "agent_templates"
         private val PATH_SEPARATORS = Regex("[/\\\\]")
+
+        /**
+         * How long one voice turn's script is given to finish. The script's
+         * own internal polling already times out after 10s (FIND_TIMEOUT_MS
+         * in ActionScriptGenerator); this leaves headroom for script startup.
+         */
+        private const val VOICE_TURN_EXECUTION_TIMEOUT_MS = 15_000L
 
         private var instance: AgentBubble? = null
 

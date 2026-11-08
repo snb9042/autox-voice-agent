@@ -26,6 +26,14 @@
   <string name="text_agent_bubble">Smart Recorder Bubble</string>
   <string name="text_agent_recorded_steps">%1$d step(s) recorded</string>
   <string name="text_agent_stop_all_scripts">Stop all scripts</string>
+  <string name="text_agent_talk">Talk</string>
+  <string name="text_agent_listening">Listening…</string>
+  <string name="text_agent_thinking">Thinking…</string>
+  <string name="text_agent_no_api_key">Set a Claude API key in Settings first</string>
+  <string name="text_agent_no_speech">Didn\'t catch that</string>
+  <string name="text_agent_no_action">Couldn\'t work out what to do</string>
+  <string name="text_agent_target_not_found">Couldn\'t find \"%1$s\"</string>
+  <string name="text_agent_action_performed">%1$s</string>
   <string name="text_ai_agent">AI Agent</string>
   <string name="text_claude_api_key">Claude API key</string>
   <string name="summary_claude_api_key">Used by the voice agent to decide what to do from your spoken instructions</string>

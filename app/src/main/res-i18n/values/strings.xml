@@ -48,6 +48,14 @@
     <string name="text_agent_bubble">智能录制悬浮窗</string>
     <string name="text_agent_recorded_steps">已录制%1$d个步骤</string>
     <string name="text_agent_stop_all_scripts">停止所有脚本</string>
+    <string name="text_agent_talk">说话</string>
+    <string name="text_agent_listening">正在聆听…</string>
+    <string name="text_agent_thinking">思考中…</string>
+    <string name="text_agent_no_api_key">请先在设置中填写 Claude API 密钥</string>
+    <string name="text_agent_no_speech">没有听清</string>
+    <string name="text_agent_no_action">无法确定要执行的操作</string>
+    <string name="text_agent_target_not_found">未找到“%1$s”</string>
+    <string name="text_agent_action_performed">%1$s</string>
     <string name="text_ai_agent">AI 智能体</string>
     <string name="text_claude_api_key">Claude API 密钥</string>
     <string name="summary_claude_api_key">语音智能体根据您的语音指令决定操作时使用</string>
