@@ -41,6 +41,7 @@ dependencies {
     debugImplementation(libs.leakcanary.android)
     implementation(libs.leakcanary.`object`.watcher.android)
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303")
 
     implementation(libs.documentfile)
     implementation(libs.androidx.preference.ktx)
