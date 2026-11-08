@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="text_agent_recorded_steps">%1$d step(s) recorded</string>
-    <string name="text_agent_bubble">Smart Recorder Bubble</string>
-</resources>
