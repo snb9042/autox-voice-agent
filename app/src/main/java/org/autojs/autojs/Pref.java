@@ -167,6 +167,10 @@ public class Pref {
         def().edit().putBoolean(KEY_AGENT_BUBBLE_SHOWN, checked).apply();
     }
 
+    public static String getClaudeApiKey() {
+        return def().getString(getString(R.string.key_claude_api_key), "");
+    }
+
     public static String getCurrentTheme() {
         return def().getString(KEY_EDITOR_THEME, null);
     }

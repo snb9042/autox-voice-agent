@@ -48,6 +48,9 @@
     <string name="text_agent_bubble">智能录制悬浮窗</string>
     <string name="text_agent_recorded_steps">已录制%1$d个步骤</string>
     <string name="text_agent_stop_all_scripts">停止所有脚本</string>
+    <string name="text_ai_agent">AI 智能体</string>
+    <string name="text_claude_api_key">Claude API 密钥</string>
+    <string name="summary_claude_api_key">语音智能体根据您的语音指令决定操作时使用</string>
     <string name="edit_exit_without_save_warn">内容尚未保存，您确定要退出吗？</string>
     <string name="text_select_save_mode">请选择保存方式</string>
     <string name="text_save_and_exit">保存并退出</string>
