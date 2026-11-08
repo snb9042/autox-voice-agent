@@ -37,4 +37,15 @@
         android:padding="8dp"
         android:src="@drawable/ic_play_fill" />
 
+    <ImageView
+        android:id="@+id/agent_stop_all_scripts"
+        android:layout_width="42dp"
+        android:layout_height="42dp"
+        android:layout_gravity="center"
+        android:background="@drawable/circle_yellow"
+        android:contentDescription="@string/text_agent_stop_all_scripts"
+        android:foreground="?selectableItemBackgroundBorderless"
+        android:padding="8dp"
+        android:src="@drawable/ic_close" />
+
 </org.autojs.autojs.ui.floating.CircularActionMenu>
