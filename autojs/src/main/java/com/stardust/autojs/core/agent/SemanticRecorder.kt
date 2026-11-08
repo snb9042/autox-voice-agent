@@ -63,6 +63,15 @@ class SemanticRecorder(
 
     override fun onAccessibilityEvent(service: AccessibilityService, event: AccessibilityEvent): Boolean {
         if (state != State.RECORDING) return false
+        // The bubble's own Record/Stop/Play controls live in this same app's
+        // process, so taps on them surface as ordinary accessibility events
+        // just like taps in the app being automated - without this check they
+        // get recorded as steps in their own right (an unlabeled icon tap
+        // reads as a CLICK_IMAGE, which is also why starting a recording used
+        // to trigger a screen-capture permission prompt immediately). Compare
+        // by content, not reference: event.packageName's concrete CharSequence
+        // type isn't guaranteed to implement value equality.
+        if (event.packageName?.toString() == service.packageName) return false
         val source = event.source ?: return false
         try {
             when (event.eventType) {
