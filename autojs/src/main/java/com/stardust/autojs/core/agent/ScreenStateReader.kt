@@ -14,6 +14,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
+private fun Bounds.containsPoint(x: Int, y: Int): Boolean = x in left..right && y in top..bottom
+
 class ScreenStateReader {
 
     data class TargetDescription(
@@ -27,12 +29,11 @@ class ScreenStateReader {
     private var templateDir: File? = null
 
     /**
-     * Shared OCR instance for [ocrFallback], which is currently disabled - so
-     * nothing reaches this at the moment. `Paddle`'s underlying `Predictor`
+     * Shared OCR instance for [ocrFallback]. `Paddle`'s underlying `Predictor`
      * does its real native model-load work on first *use*, not on
-     * construction, so holding an unused instance costs nothing; it is cached
-     * rather than constructed per call so that re-enabling OCR doesn't pay a
-     * full model load on every voice turn instead of just an inference cost.
+     * construction, so it's cached here rather than constructed per call - a
+     * fresh instance per voice turn would pay a full model load every time
+     * instead of just an inference cost.
      */
     private val paddle = Paddle()
 
@@ -190,31 +191,18 @@ class ScreenStateReader {
 
     /**
      * Everything visible right now, for the voice agent to reason over: every
-     * accessibility node's text or content-description, with its bounds.
+     * accessibility node's text or content-description with its bounds, plus
+     * on-screen text OCR can read that has no accessibility label of its own
+     * - tagged [VisibleText.isOcrSourced] so the planner routes an action on
+     * one of these to a fixed-coordinate tap instead of a selector that would
+     * never find it (see [ClaudeActionPlanner]'s `actionFromInput`). An OCR
+     * hit whose center falls inside an already-collected accessibility
+     * entry's bounds is skipped, so an already-labeled widget's text doesn't
+     * appear twice.
      *
-     * The OCR pass ([ocrFallback]) is deliberately **disabled** in this
-     * version, for three reasons:
-     *
-     *  1. It didn't work. OCR-sourced entries were tagged [MatchBy.TEXT], but
-     *     an OCR-only target has no accessibility `getText()` /
-     *     `getContentDescription()` for the generated script's
-     *     `__findTextNear` / `__findDescNear` selectors to match against at
-     *     execution time - so an OCR-matched action always burned its full
-     *     10s find timeout and then failed, defeating the point of the
-     *     fallback. Making these targets actionable needs CLICK_BOUNDS
-     *     routing for label-less targets, which does not exist yet;
-     *     **re-enabling OCR requires building that routing first.**
-     *  2. Each call captured a full-screen bitmap (and its native Mat) that
-     *     was never recycled, leaking memory on every OCR-triggering turn.
-     *  3. It appended an unbounded number of extra entries to the prompt.
-     *
-     * The accepted consequence is that targets which are readable on screen
-     * but carry no accessibility label are not voice-addressable in this
-     * version.
-     *
-     * Still call off the main thread: the accessibility walk is not work for
-     * the accessibility-event thread, the same reason template capture
-     * already runs on [captureExecutor].
+     * Still call off the main thread: the accessibility walk and OCR
+     * inference are not work for the accessibility-event thread, the same
+     * reason template capture already runs on [captureExecutor].
      */
     fun describeScreen(service: AccessibilityService): ScreenDescription {
         val root = service.rootInActiveWindow
@@ -223,6 +211,10 @@ class ScreenStateReader {
         val visible = mutableListOf<VisibleText>()
         collectVisibleText(root, visible)
         root.recycle()
+        val ocrEntries = ocrFallback().filterNot { ocrEntry ->
+            visible.any { it.bounds.containsPoint(ocrEntry.bounds.centerX(), ocrEntry.bounds.centerY()) }
+        }
+        visible.addAll(ocrEntries)
         return ScreenDescription(screenBounds, visible)
     }
 
@@ -244,29 +236,28 @@ class ScreenStateReader {
     }
 
     /**
-     * **Currently unused.** [describeScreen] no longer calls this; see its doc
-     * comment for why OCR is disabled and what has to be built before it can
-     * be switched back on. Kept, rather than deleted, so re-enabling it is a
-     * one-line change once CLICK_BOUNDS routing exists for label-less targets.
-     *
-     * When it was live it returned whole-screen OCR text unioned into
-     * [describeScreen]'s accessibility-sourced list - not, despite an earlier
-     * version of this comment, a gated fallback scoped to unlabeled widgets:
-     * it was unconditional and undeduplicated, so an already-labeled widget's
-     * text could appear twice. It never requests screen-capture permission -
-     * that belongs to an explicit user action (recording an unlabeled tap),
-     * not a side effect of speaking an instruction - and returns nothing if
-     * permission isn't already available. Note it also does not recycle the
-     * bitmap it captures (finding 4b); that must be fixed before re-enabling.
+     * Whole-screen OCR text, for labels with no accessibility text or
+     * content-description of their own. Every result is tagged
+     * [VisibleText.isOcrSourced] so the planner knows to route an action on
+     * it to a fixed-coordinate tap rather than a selector that has nothing
+     * real to match against. Never requests screen-capture permission - that
+     * belongs to an explicit user action (recording an unlabeled tap), not a
+     * side effect of speaking an instruction - and returns nothing if
+     * permission isn't already available, or if OCR fails for any reason.
+     * Deduplication against already-collected accessibility entries happens
+     * in [describeScreen], not here - this method is just the raw OCR pass.
      */
-    @Suppress("unused")
     private fun ocrFallback(): List<VisibleText> {
         val capturer = screenCaptureManager.screenCapture?.takeIf { it.available } ?: return emptyList()
         return try {
             runBlocking {
                 val screen = capturer.captureImageWrapper() ?: return@runBlocking emptyList()
-                paddle.ocr(screen).map {
-                    VisibleText(it.text, MatchBy.TEXT, Bounds.fromRect(it.bounds))
+                try {
+                    paddle.ocr(screen).map {
+                        VisibleText(it.text, MatchBy.TEXT, Bounds.fromRect(it.bounds), isOcrSourced = true)
+                    }
+                } finally {
+                    screen.recycle()
                 }
             }
         } catch (e: Exception) {
