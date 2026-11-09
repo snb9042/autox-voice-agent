@@ -57,6 +57,8 @@
     <string name="text_agent_target_not_found">未找到"%1$s"</string>
     <string name="text_agent_clarify_target_not_found">未找到"%1$s"——能换种方式描述一下吗？</string>
     <string name="text_agent_action_performed">%1$s</string>
+    <string name="text_agent_tap_on_mark_prompt">请点按屏幕上你想要点击的位置</string>
+    <string name="text_agent_tap_on_mark_performed">已点击标记的位置</string>
     <string name="text_ai_agent">AI 智能体</string>
     <string name="text_claude_api_key">Claude API 密钥</string>
     <string name="summary_claude_api_key">语音智能体根据您的语音指令决定操作时使用</string>
