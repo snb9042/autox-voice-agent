@@ -16,6 +16,13 @@ class ClaudeActionPlannerTest {
         )
     )
 
+    private val screenWithOcrTarget = ScreenDescription(
+        screenBounds = Bounds(0, 0, 1080, 2400),
+        visibleText = listOf(
+            VisibleText("Settings", MatchBy.TEXT, Bounds(700, 1000, 900, 1080), isOcrSourced = true)
+        )
+    )
+
     // --- buildRequestBody ---
 
     @Test
@@ -56,6 +63,45 @@ class ClaudeActionPlannerTest {
             .toString()
 
     private fun actionOf(result: PlanResult): SemanticAction = (result as PlanResult.Action).action
+
+    @Test
+    fun `click_text on an OCR-sourced target produces a CLICK_BOUNDS action, not a text selector`() {
+        val response = toolUseResponse(
+            JSONObject().put("action", "click_text").put("target", "Settings").put("reason", "open settings")
+        )
+        val action = actionOf(ClaudeActionPlanner.parseResponse(response, screenWithOcrTarget))
+        assertEquals(ActionType.CLICK_BOUNDS, action.type)
+        assertEquals(Bounds(700, 1000, 900, 1080), action.bounds)
+        assertEquals(null, action.targetText)
+    }
+
+    @Test
+    fun `long_click_text on an OCR-sourced target produces a CLICK_BOUNDS action with isLongClick`() {
+        val response = toolUseResponse(
+            JSONObject().put("action", "long_click_text").put("target", "Settings").put("reason", "long press settings")
+        )
+        val action = actionOf(ClaudeActionPlanner.parseResponse(response, screenWithOcrTarget))
+        assertEquals(ActionType.CLICK_BOUNDS, action.type)
+        assertTrue(action.isLongClick)
+    }
+
+    @Test
+    fun `fill_text on an OCR-sourced target asks for clarification instead of generating an unfindable selector`() {
+        val response = toolUseResponse(
+            JSONObject().put("action", "fill_text").put("target", "Settings").put("value", "hello").put("reason", "fill it")
+        )
+        val result = ClaudeActionPlanner.parseResponse(response, screenWithOcrTarget)
+        assertEquals(PlanResult.NeedsClarification("fill it"), result)
+    }
+
+    @Test
+    fun `wait_for_text on an OCR-sourced target asks for clarification`() {
+        val response = toolUseResponse(
+            JSONObject().put("action", "wait_for_text").put("target", "Settings").put("reason", "waiting")
+        )
+        val result = ClaudeActionPlanner.parseResponse(response, screenWithOcrTarget)
+        assertEquals(PlanResult.NeedsClarification("waiting"), result)
+    }
 
     @Test
     fun `click_text on a known target produces a matching CLICK_TEXT action`() {

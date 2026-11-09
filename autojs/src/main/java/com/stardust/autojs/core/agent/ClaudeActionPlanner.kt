@@ -9,7 +9,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-data class VisibleText(val text: String, val matchBy: MatchBy, val bounds: Bounds)
+data class VisibleText(val text: String, val matchBy: MatchBy, val bounds: Bounds, val isOcrSourced: Boolean = false)
 
 data class ScreenDescription(val screenBounds: Bounds, val visibleText: List<VisibleText>)
 
@@ -166,13 +166,24 @@ class ClaudeActionPlanner(
             val matched = targetName?.let { name -> screen.visibleText.firstOrNull { it.text == name } }
             val semanticAction = when (action) {
                 "click_text", "click_desc" -> matched?.let {
-                    SemanticAction(ActionType.CLICK_TEXT, it.bounds, targetText = it.text, matchBy = it.matchBy)
+                    if (it.isOcrSourced) {
+                        // No real accessibility node to re-find at execution
+                        // time - tap exactly where OCR saw it instead of
+                        // generating a selector that would never match.
+                        SemanticAction(ActionType.CLICK_BOUNDS, it.bounds)
+                    } else {
+                        SemanticAction(ActionType.CLICK_TEXT, it.bounds, targetText = it.text, matchBy = it.matchBy)
+                    }
                 }
                 "long_click_text", "long_click_desc" -> matched?.let {
-                    SemanticAction(
-                        ActionType.LONG_CLICK, it.bounds,
-                        targetText = it.text, matchBy = it.matchBy, isLongClick = true
-                    )
+                    if (it.isOcrSourced) {
+                        SemanticAction(ActionType.CLICK_BOUNDS, it.bounds, isLongClick = true)
+                    } else {
+                        SemanticAction(
+                            ActionType.LONG_CLICK, it.bounds,
+                            targetText = it.text, matchBy = it.matchBy, isLongClick = true
+                        )
+                    }
                 }
                 "fill_text", "fill_desc" -> {
                     // optString returns "" for an omitted value, and an
@@ -180,14 +191,19 @@ class ClaudeActionPlanner(
                     // field and then gets saved as a successful step. Treat a
                     // valueless fill as an action Claude couldn't determine.
                     val value = input.optString("value").takeIf { it.isNotEmpty() }
-                    if (value == null) null else matched?.let {
+                    // An OCR-sourced target has no real accessibility node to
+                    // type into either - FILL_TEXT's codegen requires an
+                    // editable(...) selector that doesn't exist for one.
+                    if (value == null) null else matched?.takeUnless { it.isOcrSourced }?.let {
                         SemanticAction(
                             ActionType.FILL_TEXT, it.bounds,
                             targetText = it.text, matchBy = it.matchBy, fillValue = value
                         )
                     }
                 }
-                "wait_for_text", "wait_for_desc" -> matched?.let {
+                "wait_for_text", "wait_for_desc" -> matched?.takeUnless { it.isOcrSourced }?.let {
+                    // Same reasoning as fill above - WAIT's codegen needs a
+                    // pollable selector, not a one-shot coordinate.
                     SemanticAction(ActionType.WAIT, it.bounds, targetText = it.text, matchBy = it.matchBy)
                 }
                 "scroll" -> scrollDirectionFrom(input)?.let {
