@@ -104,7 +104,7 @@ class CircularMenu(context: Context) : Recorder.OnStateChangedListener, CaptureA
                 }
             }
         )
-        mWindow?.setKeepToSideHiddenWidthRadio(0.25f)
+        mWindow?.setKeepToSideHiddenWidthRadio(0f)
         FloatyService.addWindow(mWindow)
     }
 

@@ -111,11 +111,11 @@ class AgentBubble(context: Context) {
     }
 
     private fun initFloaty() {
-        // Known, accepted limitation: CircularMenuWindow persists its position
-        // under keys derived from its own class name, so this bubble and the
-        // legacy CircularMenu bubble share one saved position and whichever
-        // closes last wins. Fixing that would mean changing the shared
-        // CircularMenuWindow, which this feature deliberately leaves untouched.
+        // CircularMenuWindow persists its position under keys derived from
+        // its own class name, so this bubble and the legacy CircularMenu
+        // bubble share one saved position and whichever closes last wins -
+        // both bubbles are meant to remember "the last place either of them
+        // was left," not independent positions.
         mWindow = CircularMenuWindow(
             mContext,
             object : CircularMenuFloaty {
@@ -147,7 +147,7 @@ class AgentBubble(context: Context) {
         // CircularMenuWindow.setListeners() already installs the
         // expand/collapse toggle on the action view, so there is nothing to
         // override here.
-        mWindow?.setKeepToSideHiddenWidthRadio(0.25f)
+        mWindow?.setKeepToSideHiddenWidthRadio(0f)
         FloatyService.addWindow(mWindow)
     }
 

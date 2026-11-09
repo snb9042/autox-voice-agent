@@ -78,8 +78,9 @@ public class CircularMenuWindow extends FloatyWindow {
 
     private void setInitialState() {
         SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(mContext);
+        int x = preferences.getInt(KEY_POSITION_X, mActionViewWindowBridge.getX());
         int y = preferences.getInt(KEY_POSITION_Y, ScreenMetrics.getDeviceScreenHeight() / 2);
-        mActionViewWindowBridge.updatePosition(mActionViewWindowBridge.getX(), y);
+        mActionViewWindowBridge.updatePosition(x, y);
         keepToSide();
     }
 
