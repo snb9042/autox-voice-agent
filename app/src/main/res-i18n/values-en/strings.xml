@@ -37,6 +37,8 @@
   <string name="text_agent_action_performed">%1$s</string>
   <string name="text_agent_tap_on_mark_prompt">Tap the screen where you want to tap</string>
   <string name="text_agent_tap_on_mark_performed">Tapped the marked point</string>
+  <string name="text_agent_find_image_prompt">Drag a box around what you want to find</string>
+  <string name="text_agent_find_image_performed">Tapped the matched image</string>
   <string name="text_ai_agent">AI Agent</string>
   <string name="text_claude_api_key">Claude API key</string>
   <string name="summary_claude_api_key">Used by the voice agent to decide what to do from your spoken instructions</string>

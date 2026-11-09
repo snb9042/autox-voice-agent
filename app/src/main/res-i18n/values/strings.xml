@@ -59,6 +59,8 @@
     <string name="text_agent_action_performed">%1$s</string>
     <string name="text_agent_tap_on_mark_prompt">请点按屏幕上你想要点击的位置</string>
     <string name="text_agent_tap_on_mark_performed">已点击标记的位置</string>
+    <string name="text_agent_find_image_prompt">请在你想要查找的内容周围拖拽选框</string>
+    <string name="text_agent_find_image_performed">已点击匹配的图像</string>
     <string name="text_ai_agent">AI 智能体</string>
     <string name="text_claude_api_key">Claude API 密钥</string>
     <string name="summary_claude_api_key">语音智能体根据您的语音指令决定操作时使用</string>
