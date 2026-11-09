@@ -31,7 +31,7 @@ public class CircularMenuWindow extends FloatyWindow {
     protected View.OnClickListener mActionViewOnClickListener;
     protected float mKeepToSideHiddenWidthRadio;
     protected float mActiveAlpha = 1.0F;
-    protected float mInactiveAlpha = 0.4F;
+    protected float mInactiveAlpha = 0.95F;
     private Context mContext;
     private OrientationEventListener mOrientationEventListener;
 
