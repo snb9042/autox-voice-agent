@@ -21,6 +21,7 @@ import com.stardust.app.DialogUtils
 import com.stardust.autojs.core.agent.ActionOptimizer
 import com.stardust.autojs.core.agent.ActionScriptGenerator
 import com.stardust.autojs.core.agent.ActionType
+import com.stardust.autojs.core.agent.Bounds
 import com.stardust.autojs.core.agent.ClaudeActionPlanner
 import com.stardust.autojs.core.agent.PlanResult
 import com.stardust.autojs.core.agent.ScreenStateReader
@@ -104,6 +105,7 @@ class AgentBubble(context: Context) {
         override fun onVolumeUpHoldStart() = this@AgentBubble.onVolumeUpHoldStart()
         override fun onVolumeUpHoldEnd() = this@AgentBubble.onVolumeUpHoldEnd()
     }
+    private var mTapOnMarkWindow: TapOnMarkFloatyWindow? = null
 
     /**
      * One voice turn (screen description + the Claude call + running the
@@ -188,6 +190,10 @@ class AgentBubble(context: Context) {
 
     private fun stopActive() {
         mWindow?.collapse()
+        mTapOnMarkWindow?.let {
+            it.close()
+            mTapOnMarkWindow = null
+        }
         when {
             mRecorder.state == SemanticRecorder.State.RECORDING -> {
                 val actions = mRecorder.stop()
@@ -278,7 +284,12 @@ class AgentBubble(context: Context) {
      * normal way listening ends for this path, by calling stopListening()
      * directly, which this safety timer also does if it fires first.
      */
-    private fun listenForInstruction(walkieTalkie: Boolean = false, onTranscribed: (String) -> Unit = { runVoiceTurn(it) }) {
+    private fun listenForInstruction(
+        walkieTalkie: Boolean = false,
+        onTranscribed: (String) -> Unit = { text ->
+            if (TapOnMarkFloatyWindow.matchesCallsign(text)) startTapOnMark() else runVoiceTurn(text)
+        }
+    ) {
         AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_listening))
         val recognizer = SpeechRecognizer.createSpeechRecognizer(mContext).also { mSpeechRecognizer = it }
         recognizer.setRecognitionListener(object : RecognitionListener {
@@ -354,6 +365,54 @@ class AgentBubble(context: Context) {
     private fun onVolumeUpHoldEnd() {
         mWalkieTalkieHandler.removeCallbacks(mWalkieTalkieSafetyStopRunnable)
         mSpeechRecognizer?.stopListening()
+    }
+
+    /** Invoked on the main thread once "tap on mark"/"tap the mark" is transcribed. */
+    private fun startTapOnMark() {
+        mWindow?.collapse()
+        // Same mutual-exclusion as startVoiceTurn() - this begins a voice
+        // session's action the same way any other targeted tap would.
+        if (mRecorder.state == SemanticRecorder.State.RECORDING) return
+        if (!AccessibilityServiceTool.isAccessibilityServiceEnabled(mContext)) {
+            AccessibilityServiceTool.goToAccessibilitySetting()
+            return
+        }
+        AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_tap_on_mark_prompt))
+        if (mVoiceSession.state != VoiceAgentSession.State.ACTIVE) {
+            // A new session identity starts here too - see
+            // mVoiceSessionEpoch's doc comment.
+            mVoiceSessionEpoch++
+            mVoiceSession.start()
+        }
+        val sessionEpoch = mVoiceSessionEpoch
+        val window = TapOnMarkFloatyWindow { bounds -> onMarkTapped(bounds, sessionEpoch) }
+        mTapOnMarkWindow = window
+        FloatyService.addWindow(window)
+    }
+
+    /** Invoked on the main thread by [TapOnMarkFloatyWindow] once a point is marked. */
+    private fun onMarkTapped(bounds: Bounds, sessionEpoch: Int) {
+        mTapOnMarkWindow = null
+        if (mVoiceSessionEpoch != sessionEpoch) return
+        val action = SemanticAction(ActionType.CLICK_BOUNDS, bounds)
+        voiceTurnExecutor.execute {
+            try {
+                if (mVoiceSessionEpoch != sessionEpoch) return@execute
+                val succeeded = executeAction(action)
+                if (mVoiceSessionEpoch != sessionEpoch) return@execute
+                if (succeeded) {
+                    mVoiceSession.addAction(action)
+                    AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_tap_on_mark_performed))
+                } else {
+                    AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+                }
+            } catch (e: InterruptedException) {
+                // close() interrupted this turn via shutdownNow(). The bubble
+                // is going away, so there is no longer anyone to report to.
+            } catch (e: Exception) {
+                AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+            }
+        }
     }
 
     /** Runs the describe-plan-execute sequence on [voiceTurnExecutor]. */
@@ -752,6 +811,10 @@ class AgentBubble(context: Context) {
         mSpeechRecognizer = null
         mWalkieTalkieHandler.removeCallbacks(mWalkieTalkieSafetyStopRunnable)
         GlobalKeyObserver.getSingleton().removeVolumeUpHoldListener(mVolumeUpHoldListener)
+        mTapOnMarkWindow?.let {
+            it.close()
+            mTapOnMarkWindow = null
+        }
         // A turn still in flight when the bubble closes has no bubble left to
         // report into: flag it stale (see mVoiceSessionEpoch), kill the script
         // it may have driving the screen, and interrupt the executor rather
