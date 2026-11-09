@@ -106,6 +106,7 @@ class AgentBubble(context: Context) {
         override fun onVolumeUpHoldEnd() = this@AgentBubble.onVolumeUpHoldEnd()
     }
     private var mTapOnMarkWindow: TapOnMarkFloatyWindow? = null
+    private var mFindImageWindow: FindImageFloatyWindow? = null
 
     /**
      * One voice turn (screen description + the Claude call + running the
@@ -193,6 +194,10 @@ class AgentBubble(context: Context) {
         mTapOnMarkWindow?.let {
             it.close()
             mTapOnMarkWindow = null
+        }
+        mFindImageWindow?.let {
+            it.close()
+            mFindImageWindow = null
         }
         when {
             mRecorder.state == SemanticRecorder.State.RECORDING -> {
@@ -287,7 +292,11 @@ class AgentBubble(context: Context) {
     private fun listenForInstruction(
         walkieTalkie: Boolean = false,
         onTranscribed: (String) -> Unit = { text ->
-            if (TapOnMarkFloatyWindow.matchesCallsign(text)) startTapOnMark() else runVoiceTurn(text)
+            when {
+                TapOnMarkFloatyWindow.matchesCallsign(text) -> startTapOnMark()
+                FindImageFloatyWindow.matchesCallsign(text) -> startFindImage()
+                else -> runVoiceTurn(text)
+            }
         }
     ) {
         AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_listening))
@@ -411,6 +420,79 @@ class AgentBubble(context: Context) {
                 // is going away, so there is no longer anyone to report to.
             } catch (e: Exception) {
                 AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+            }
+        }
+    }
+
+    /** Invoked on the main thread once "find image" is transcribed. */
+    private fun startFindImage() {
+        mWindow?.collapse()
+        // Same mutual-exclusion as startVoiceTurn()/startTapOnMark().
+        if (mRecorder.state == SemanticRecorder.State.RECORDING) return
+        if (!AccessibilityServiceTool.isAccessibilityServiceEnabled(mContext)) {
+            AccessibilityServiceTool.goToAccessibilitySetting()
+            return
+        }
+        AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_find_image_prompt))
+        if (mVoiceSession.state != VoiceAgentSession.State.ACTIVE) {
+            // A new session identity starts here too - see
+            // mVoiceSessionEpoch's doc comment.
+            mVoiceSessionEpoch++
+            mVoiceSession.start()
+        }
+        val sessionEpoch = mVoiceSessionEpoch
+        val window = FindImageFloatyWindow { bounds -> onImageRegionMarked(bounds, sessionEpoch) }
+        mFindImageWindow = window
+        FloatyService.addWindow(window)
+    }
+
+    /** Invoked on the main thread by [FindImageFloatyWindow] once a region is marked. */
+    private fun onImageRegionMarked(bounds: Bounds, sessionEpoch: Int) {
+        mFindImageWindow = null
+        if (mVoiceSessionEpoch != sessionEpoch) return
+        val service = AccessibilityService.instance
+        if (service == null) {
+            AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+            return
+        }
+        mScreenStateReader.captureTemplateAsync(service, bounds) { path ->
+            if (mVoiceSessionEpoch != sessionEpoch) {
+                // The session this capture belonged to is already gone - the
+                // template would never be referenced by anything; don't leave
+                // it on disk.
+                mScreenStateReader.deleteTemplate(path)
+                return@captureTemplateAsync
+            }
+            if (path == null) {
+                AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+                return@captureTemplateAsync
+            }
+            val action = SemanticAction(ActionType.CLICK_IMAGE, bounds, imageTemplatePath = path)
+            voiceTurnExecutor.execute {
+                try {
+                    if (mVoiceSessionEpoch != sessionEpoch) {
+                        mScreenStateReader.deleteTemplate(path)
+                        return@execute
+                    }
+                    val succeeded = executeAction(action)
+                    if (mVoiceSessionEpoch != sessionEpoch) {
+                        mScreenStateReader.deleteTemplate(path)
+                        return@execute
+                    }
+                    if (succeeded) {
+                        mVoiceSession.addAction(action)
+                        AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_find_image_performed))
+                    } else {
+                        mScreenStateReader.deleteTemplate(path)
+                        AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+                    }
+                } catch (e: InterruptedException) {
+                    // close() interrupted this turn via shutdownNow(). The bubble
+                    // is going away, so there is no longer anyone to report to.
+                } catch (e: Exception) {
+                    mScreenStateReader.deleteTemplate(path)
+                    AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+                }
             }
         }
     }
@@ -814,6 +896,10 @@ class AgentBubble(context: Context) {
         mTapOnMarkWindow?.let {
             it.close()
             mTapOnMarkWindow = null
+        }
+        mFindImageWindow?.let {
+            it.close()
+            mFindImageWindow = null
         }
         // A turn still in flight when the bubble closes has no bubble left to
         // report into: flag it stale (see mVoiceSessionEpoch), kill the script
