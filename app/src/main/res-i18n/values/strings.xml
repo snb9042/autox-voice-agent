@@ -54,7 +54,8 @@
     <string name="text_agent_no_api_key">请先在设置中填写 Claude API 密钥</string>
     <string name="text_agent_no_speech">没有听清</string>
     <string name="text_agent_no_action">无法确定要执行的操作</string>
-    <string name="text_agent_target_not_found">未找到“%1$s”</string>
+    <string name="text_agent_target_not_found">未找到"%1$s"</string>
+    <string name="text_agent_clarify_target_not_found">未找到"%1$s"——能换种方式描述一下吗？</string>
     <string name="text_agent_action_performed">%1$s</string>
     <string name="text_ai_agent">AI 智能体</string>
     <string name="text_claude_api_key">Claude API 密钥</string>

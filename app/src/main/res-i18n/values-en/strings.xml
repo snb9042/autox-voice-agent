@@ -33,6 +33,7 @@
   <string name="text_agent_no_speech">Didn\'t catch that</string>
   <string name="text_agent_no_action">Couldn\'t work out what to do</string>
   <string name="text_agent_target_not_found">Couldn\'t find \"%1$s\"</string>
+  <string name="text_agent_clarify_target_not_found">Couldn\'t find \"%1$s\" — can you describe it differently?</string>
   <string name="text_agent_action_performed">%1$s</string>
   <string name="text_ai_agent">AI Agent</string>
   <string name="text_claude_api_key">Claude API key</string>

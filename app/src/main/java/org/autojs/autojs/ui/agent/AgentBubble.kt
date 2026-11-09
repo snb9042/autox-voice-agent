@@ -22,6 +22,7 @@ import com.stardust.autojs.core.agent.ActionOptimizer
 import com.stardust.autojs.core.agent.ActionScriptGenerator
 import com.stardust.autojs.core.agent.ActionType
 import com.stardust.autojs.core.agent.ClaudeActionPlanner
+import com.stardust.autojs.core.agent.PlanResult
 import com.stardust.autojs.core.agent.ScreenStateReader
 import com.stardust.autojs.core.agent.SemanticAction
 import com.stardust.autojs.core.agent.SemanticRecorder
@@ -277,7 +278,7 @@ class AgentBubble(context: Context) {
      * normal way listening ends for this path, by calling stopListening()
      * directly, which this safety timer also does if it fires first.
      */
-    private fun listenForInstruction(walkieTalkie: Boolean = false) {
+    private fun listenForInstruction(walkieTalkie: Boolean = false, onTranscribed: (String) -> Unit = { runVoiceTurn(it) }) {
         AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_listening))
         val recognizer = SpeechRecognizer.createSpeechRecognizer(mContext).also { mSpeechRecognizer = it }
         recognizer.setRecognitionListener(object : RecognitionListener {
@@ -289,7 +290,7 @@ class AgentBubble(context: Context) {
                 if (text.isNullOrBlank()) {
                     AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_speech))
                 } else {
-                    runVoiceTurn(text)
+                    onTranscribed(text)
                 }
             }
 
@@ -356,7 +357,14 @@ class AgentBubble(context: Context) {
     }
 
     /** Runs the describe-plan-execute sequence on [voiceTurnExecutor]. */
-    private fun runVoiceTurn(instruction: String) {
+    /**
+     * [isRetry] caps clarification at exactly one round: a true turn is
+     * itself the retry after the user answered a clarifying question, so a
+     * further NeedsClarification (from the planner, or a second execution
+     * failure) is reported as today's terminal failure instead of asking
+     * again - see [askForClarification].
+     */
+    private fun runVoiceTurn(instruction: String, isRetry: Boolean = false) {
         AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_thinking))
         // Captured on the main thread, before this turn is handed off - see
         // mVoiceSessionEpoch's doc comment. Stop (or a fresh Talk tap) can
@@ -384,34 +392,52 @@ class AgentBubble(context: Context) {
                     return@execute
                 }
                 val screen = mScreenStateReader.describeScreen(service)
-                val action = mPlanner.plan(instruction, screen, Pref.getClaudeApiKey())
-                if (action == null) {
-                    AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
-                    return@execute
-                }
-                // Describing the screen and the Claude round trip both take
-                // real time. Re-check before physically touching the screen,
-                // so a Stop during that window doesn't still perform an action.
-                if (mVoiceSessionEpoch != sessionEpoch) return@execute
-                val succeeded = executeAction(action)
-                if (mVoiceSessionEpoch != sessionEpoch) {
-                    // The session this turn belongs to was stopped, or a new one
-                    // started, while this turn was still in flight. Its result
-                    // is stale and must not be folded into whatever session is
-                    // live now - drop it silently rather than calling
-                    // addAction() or reporting on it.
-                    return@execute
-                }
-                if (succeeded) {
-                    mVoiceSession.addAction(action)
-                    AutoJs.getInstance().uiHandler.toast(
-                        mContext.getString(R.string.text_agent_action_performed, instruction)
-                    )
-                } else {
-                    val label = action.targetText ?: instruction
-                    AutoJs.getInstance().uiHandler.toast(
-                        mContext.getString(R.string.text_agent_target_not_found, label)
-                    )
+                when (val result = mPlanner.plan(instruction, screen, Pref.getClaudeApiKey())) {
+                    is PlanResult.Failed -> {
+                        AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+                    }
+                    is PlanResult.NeedsClarification -> {
+                        if (isRetry) {
+                            AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+                        } else {
+                            askForClarification(instruction, result.question, sessionEpoch)
+                        }
+                    }
+                    is PlanResult.Action -> {
+                        // Describing the screen and the Claude round trip both
+                        // take real time. Re-check before physically touching
+                        // the screen, so a Stop during that window doesn't
+                        // still perform an action.
+                        if (mVoiceSessionEpoch != sessionEpoch) return@execute
+                        val succeeded = executeAction(result.action)
+                        if (mVoiceSessionEpoch != sessionEpoch) {
+                            // The session this turn belongs to was stopped, or a
+                            // new one started, while this turn was still in
+                            // flight. Its result is stale and must not be folded
+                            // into whatever session is live now - drop it
+                            // silently rather than calling addAction() or
+                            // reporting/asking about it.
+                            return@execute
+                        }
+                        if (succeeded) {
+                            mVoiceSession.addAction(result.action)
+                            AutoJs.getInstance().uiHandler.toast(
+                                mContext.getString(R.string.text_agent_action_performed, instruction)
+                            )
+                        } else if (isRetry) {
+                            val label = result.action.targetText ?: instruction
+                            AutoJs.getInstance().uiHandler.toast(
+                                mContext.getString(R.string.text_agent_target_not_found, label)
+                            )
+                        } else {
+                            val label = result.action.targetText ?: instruction
+                            askForClarification(
+                                instruction,
+                                mContext.getString(R.string.text_agent_clarify_target_not_found, label),
+                                sessionEpoch
+                            )
+                        }
+                    }
                 }
             } catch (e: InterruptedException) {
                 // close() interrupted this turn via shutdownNow(). The bubble
@@ -419,6 +445,24 @@ class AgentBubble(context: Context) {
                 // toasting here would surface a failure after the UI is gone.
             } catch (e: Exception) {
                 AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_action))
+            }
+        }
+    }
+
+    /**
+     * Shows [question], then listens for one spoken answer and retries the
+     * turn with it folded into the original instruction - at most once, see
+     * [runVoiceTurn]'s [isRetry] parameter. Called from the background
+     * [voiceTurnExecutor] thread; hops to the main thread itself since
+     * [listenForInstruction] requires it.
+     */
+    private fun askForClarification(originalInstruction: String, question: String, sessionEpoch: Int) {
+        AutoJs.getInstance().uiHandler.toast(question)
+        mWalkieTalkieHandler.post {
+            if (mVoiceSessionEpoch != sessionEpoch) return@post
+            if (mSpeechRecognizer != null) return@post
+            listenForInstruction(walkieTalkie = true) { answer ->
+                runVoiceTurn("$originalInstruction ($answer)", isRetry = true)
             }
         }
     }
