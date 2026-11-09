@@ -2,7 +2,6 @@ package com.stardust.autojs.core.agent
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -36,6 +35,15 @@ class ClaudeActionPlannerTest {
         assertEquals("perform_action", body.getJSONArray("tools").getJSONObject(0).getString("name"))
     }
 
+    @Test
+    fun `the reason field's description instructs Claude to ask a question when action is none`() {
+        val body = ClaudeActionPlanner.buildRequestBody("tap login", screen)
+        val reasonDescription = body.getJSONArray("tools").getJSONObject(0)
+            .getJSONObject("input_schema").getJSONObject("properties")
+            .getJSONObject("reason").getString("description")
+        assertTrue(reasonDescription.contains("question"))
+    }
+
     // --- parseResponse ---
 
     private fun toolUseResponse(input: JSONObject): String =
@@ -47,16 +55,18 @@ class ClaudeActionPlannerTest {
             )
             .toString()
 
+    private fun actionOf(result: PlanResult): SemanticAction = (result as PlanResult.Action).action
+
     @Test
     fun `click_text on a known target produces a matching CLICK_TEXT action`() {
         val response = toolUseResponse(
             JSONObject().put("action", "click_text").put("target", "Login").put("reason", "user asked to log in")
         )
-        val action = ClaudeActionPlanner.parseResponse(response, screen)
-        assertEquals(ActionType.CLICK_TEXT, action?.type)
-        assertEquals("Login", action?.targetText)
-        assertEquals(MatchBy.TEXT, action?.matchBy)
-        assertEquals(Bounds(100, 200, 300, 260), action?.bounds)
+        val action = actionOf(ClaudeActionPlanner.parseResponse(response, screen))
+        assertEquals(ActionType.CLICK_TEXT, action.type)
+        assertEquals("Login", action.targetText)
+        assertEquals(MatchBy.TEXT, action.matchBy)
+        assertEquals(Bounds(100, 200, 300, 260), action.bounds)
     }
 
     @Test
@@ -64,9 +74,9 @@ class ClaudeActionPlannerTest {
         val response = toolUseResponse(
             JSONObject().put("action", "click_desc").put("target", "More options").put("reason", "open the menu")
         )
-        val action = ClaudeActionPlanner.parseResponse(response, screen)
-        assertEquals(ActionType.CLICK_TEXT, action?.type)
-        assertEquals(MatchBy.DESC, action?.matchBy)
+        val action = actionOf(ClaudeActionPlanner.parseResponse(response, screen))
+        assertEquals(ActionType.CLICK_TEXT, action.type)
+        assertEquals(MatchBy.DESC, action.matchBy)
     }
 
     @Test
@@ -74,28 +84,30 @@ class ClaudeActionPlannerTest {
         val response = toolUseResponse(
             JSONObject().put("action", "fill_desc").put("target", "Email").put("value", "a@b.com").put("reason", "fill the email field")
         )
-        val action = ClaudeActionPlanner.parseResponse(response, screen)
-        assertEquals(ActionType.FILL_TEXT, action?.type)
-        assertEquals("a@b.com", action?.fillValue)
-        assertEquals(MatchBy.DESC, action?.matchBy)
+        val action = actionOf(ClaudeActionPlanner.parseResponse(response, screen))
+        assertEquals(ActionType.FILL_TEXT, action.type)
+        assertEquals("a@b.com", action.fillValue)
+        assertEquals(MatchBy.DESC, action.matchBy)
     }
 
     @Test
-    fun `a fill with no value is rejected rather than blanking the field`() {
+    fun `a fill with no value asks for clarification rather than blanking the field`() {
         // An empty-string fill would *succeed* at execution time - wiping the
         // target field - and then be saved as a successful step.
         val response = toolUseResponse(
             JSONObject().put("action", "fill_desc").put("target", "Email").put("reason", "fill the email field")
         )
-        assertNull(ClaudeActionPlanner.parseResponse(response, screen))
+        val result = ClaudeActionPlanner.parseResponse(response, screen)
+        assertEquals(PlanResult.NeedsClarification("fill the email field"), result)
     }
 
     @Test
-    fun `a fill with an explicitly empty value is rejected too`() {
+    fun `a fill with an explicitly empty value asks for clarification too`() {
         val response = toolUseResponse(
             JSONObject().put("action", "fill_text").put("target", "Login").put("value", "").put("reason", "fill it")
         )
-        assertNull(ClaudeActionPlanner.parseResponse(response, screen))
+        val result = ClaudeActionPlanner.parseResponse(response, screen)
+        assertEquals(PlanResult.NeedsClarification("fill it"), result)
     }
 
     @Test
@@ -103,9 +115,9 @@ class ClaudeActionPlannerTest {
         val response = toolUseResponse(
             JSONObject().put("action", "wait_for_text").put("target", "Login").put("reason", "waiting for the page")
         )
-        val action = ClaudeActionPlanner.parseResponse(response, screen)
-        assertEquals(ActionType.WAIT, action?.type)
-        assertEquals("Login", action?.targetText)
+        val action = actionOf(ClaudeActionPlanner.parseResponse(response, screen))
+        assertEquals(ActionType.WAIT, action.type)
+        assertEquals("Login", action.targetText)
     }
 
     @Test
@@ -113,9 +125,9 @@ class ClaudeActionPlannerTest {
         val response = toolUseResponse(
             JSONObject().put("action", "long_click_text").put("target", "Login").put("reason", "long press to select")
         )
-        val action = ClaudeActionPlanner.parseResponse(response, screen)
-        assertEquals(ActionType.LONG_CLICK, action?.type)
-        assertTrue(action?.isLongClick == true)
+        val action = actionOf(ClaudeActionPlanner.parseResponse(response, screen))
+        assertEquals(ActionType.LONG_CLICK, action.type)
+        assertTrue(action.isLongClick)
     }
 
     @Test
@@ -123,43 +135,47 @@ class ClaudeActionPlannerTest {
         val response = toolUseResponse(
             JSONObject().put("action", "scroll").put("direction", "down").put("reason", "see more content")
         )
-        val action = ClaudeActionPlanner.parseResponse(response, screen)
-        assertEquals(ActionType.SCROLL, action?.type)
-        assertEquals(ScrollDirection.DOWN, action?.scrollDirection)
-        assertEquals(screen.screenBounds, action?.bounds)
+        val action = actionOf(ClaudeActionPlanner.parseResponse(response, screen))
+        assertEquals(ActionType.SCROLL, action.type)
+        assertEquals(ScrollDirection.DOWN, action.scrollDirection)
+        assertEquals(screen.screenBounds, action.bounds)
     }
 
     @Test
-    fun `action none returns null`() {
-        val response = toolUseResponse(JSONObject().put("action", "none").put("reason", "nothing on screen matches"))
-        assertNull(ClaudeActionPlanner.parseResponse(response, screen))
+    fun `action none asks for clarification using Claude's reason as the question`() {
+        val response = toolUseResponse(
+            JSONObject().put("action", "none").put("reason", "Which button do you mean - Submit or Cancel?")
+        )
+        val result = ClaudeActionPlanner.parseResponse(response, screen)
+        assertEquals(PlanResult.NeedsClarification("Which button do you mean - Submit or Cancel?"), result)
     }
 
     @Test
-    fun `a target not present on screen returns null rather than a guessed bounds`() {
+    fun `a target not present on screen asks for clarification rather than a guessed bounds`() {
         val response = toolUseResponse(
             JSONObject().put("action", "click_text").put("target", "Nonexistent Button").put("reason", "guess")
         )
-        assertNull(ClaudeActionPlanner.parseResponse(response, screen))
+        val result = ClaudeActionPlanner.parseResponse(response, screen)
+        assertEquals(PlanResult.NeedsClarification("guess"), result)
     }
 
     @Test
-    fun `a response with no tool_use block returns null`() {
+    fun `a response with no tool_use block fails rather than asking for clarification`() {
         val response = JSONObject().put("content", org.json.JSONArray()).toString()
-        assertNull(ClaudeActionPlanner.parseResponse(response, screen))
+        assertEquals(PlanResult.Failed, ClaudeActionPlanner.parseResponse(response, screen))
     }
 
     @Test
-    fun `a response whose content array contains non-object elements returns null gracefully`() {
+    fun `a response whose content array contains non-object elements fails gracefully`() {
         val response = JSONObject()
             .put("content", org.json.JSONArray().put("not an object").put(123).put(true))
             .toString()
-        assertNull(ClaudeActionPlanner.parseResponse(response, screen))
+        assertEquals(PlanResult.Failed, ClaudeActionPlanner.parseResponse(response, screen))
     }
 
     @Test
-    fun `a response with invalid JSON returns null gracefully`() {
+    fun `a response with invalid JSON fails gracefully`() {
         val invalidJson = "{ broken json without closing"
-        assertNull(ClaudeActionPlanner.parseResponse(invalidJson, screen))
+        assertEquals(PlanResult.Failed, ClaudeActionPlanner.parseResponse(invalidJson, screen))
     }
 }

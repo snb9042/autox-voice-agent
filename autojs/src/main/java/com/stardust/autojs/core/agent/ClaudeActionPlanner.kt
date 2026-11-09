@@ -13,6 +13,12 @@ data class VisibleText(val text: String, val matchBy: MatchBy, val bounds: Bound
 
 data class ScreenDescription(val screenBounds: Bounds, val visibleText: List<VisibleText>)
 
+sealed class PlanResult {
+    data class Action(val action: SemanticAction) : PlanResult()
+    data class NeedsClarification(val question: String) : PlanResult()
+    object Failed : PlanResult()
+}
+
 class ClaudeActionPlanner(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -22,17 +28,18 @@ class ClaudeActionPlanner(
 
     /**
      * One Claude call: given what's currently visible and one spoken
-     * instruction, returns the single action Claude chose, or null if Claude
-     * couldn't determine one, the request couldn't even be built (a malformed
-     * api key), the HTTP call failed, or the response didn't match the
-     * expected shape. Never throws. Blocking - call off the main thread.
+     * instruction, returns the action Claude chose, a clarifying question if
+     * Claude couldn't determine one but explained why, or Failed if the
+     * request couldn't even be built (a malformed api key), the HTTP call
+     * failed, or the response didn't match the expected shape. Never throws.
+     * Blocking - call off the main thread.
      */
-    fun plan(instruction: String, screen: ScreenDescription, apiKey: String): SemanticAction? {
+    fun plan(instruction: String, screen: ScreenDescription, apiKey: String): PlanResult {
         return try {
             // Request building is inside the try on purpose: addHeader()
             // throws IllegalArgumentException on an api key containing
             // whitespace or any non-printable-ASCII character, and that must
-            // be reported as "no action" like any other failure rather than
+            // be reported as Failed like any other failure rather than
             // propagate out of this method.
             val request = Request.Builder()
                 .url(API_URL)
@@ -42,18 +49,18 @@ class ClaudeActionPlanner(
                 .post(buildRequestBody(instruction, screen).toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
             httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return null
-                val body = response.body?.string() ?: return null
+                if (!response.isSuccessful) return PlanResult.Failed
+                val body = response.body?.string() ?: return PlanResult.Failed
                 parseResponse(body, screen)
             }
         } catch (e: Exception) {
             // Deliberately broader than IOException: building the request can
             // fail too - addHeader() throws IllegalArgumentException on a key
             // with whitespace or non-printable-ASCII characters in it - and
-            // this method's contract is to return null on any failure rather
+            // this method's contract is to return Failed on any failure rather
             // than propagate to a caller running on a background thread where
             // the global crash handler would swallow it.
-            null
+            PlanResult.Failed
         }
     }
 
@@ -123,7 +130,10 @@ class ClaudeActionPlanner(
                 )
                 .put(
                     "reason", JSONObject().put("type", "string")
-                        .put("description", "One sentence: why this action, or why none could be determined.")
+                        .put(
+                            "description",
+                            "If action is \"none\": a short, direct question to ask the user to get the detail you're missing (e.g. \"Which button do you mean - the blue 'Submit' or the gray 'Cancel'?\"), not an internal explanation. Otherwise: one sentence explaining why you chose this action."
+                        )
                 )
             return JSONObject()
                 .put("type", "object")
@@ -131,28 +141,30 @@ class ClaudeActionPlanner(
                 .put("required", JSONArray(listOf("action", "reason")))
         }
 
-        /** Pure, independently testable: Claude's response JSON -> one SemanticAction, or null. */
-        fun parseResponse(responseBody: String, screen: ScreenDescription): SemanticAction? {
+        /** Pure, independently testable: Claude's response JSON -> a PlanResult. */
+        fun parseResponse(responseBody: String, screen: ScreenDescription): PlanResult {
             return try {
-                val content = JSONObject(responseBody).optJSONArray("content") ?: return null
+                val content = JSONObject(responseBody).optJSONArray("content") ?: return PlanResult.Failed
                 for (i in 0 until content.length()) {
                     val block = content.optJSONObject(i) ?: continue
                     if (block.optString("type") != "tool_use") continue
-                    val input = block.optJSONObject("input") ?: return null
+                    val input = block.optJSONObject("input") ?: return PlanResult.Failed
                     return actionFromInput(input, screen)
                 }
-                null
+                PlanResult.Failed
             } catch (e: JSONException) {
-                null
+                PlanResult.Failed
             }
         }
 
-        private fun actionFromInput(input: JSONObject, screen: ScreenDescription): SemanticAction? {
+        private fun actionFromInput(input: JSONObject, screen: ScreenDescription): PlanResult {
             val action = input.optString("action")
-            if (action.isEmpty() || action == "none") return null
+            val reason = input.optString("reason")
+                .ifBlank { "I couldn't quite work that out - could you clarify?" }
+            if (action.isEmpty() || action == "none") return PlanResult.NeedsClarification(reason)
             val targetName = input.optString("target").takeIf { it.isNotBlank() }
             val matched = targetName?.let { name -> screen.visibleText.firstOrNull { it.text == name } }
-            return when (action) {
+            val semanticAction = when (action) {
                 "click_text", "click_desc" -> matched?.let {
                     SemanticAction(ActionType.CLICK_TEXT, it.bounds, targetText = it.text, matchBy = it.matchBy)
                 }
@@ -183,6 +195,7 @@ class ClaudeActionPlanner(
                 }
                 else -> null
             }
+            return semanticAction?.let { PlanResult.Action(it) } ?: PlanResult.NeedsClarification(reason)
         }
 
         private fun scrollDirectionFrom(input: JSONObject): ScrollDirection? = when (input.optString("direction")) {
