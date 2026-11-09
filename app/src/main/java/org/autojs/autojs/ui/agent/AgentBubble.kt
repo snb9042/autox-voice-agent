@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -34,6 +36,7 @@ import com.stardust.enhancedfloaty.FloatyService
 import com.stardust.view.accessibility.AccessibilityService
 import org.autojs.autojs.Pref
 import org.autojs.autojs.autojs.AutoJs
+import org.autojs.autojs.autojs.key.GlobalKeyObserver
 import org.autojs.autojs.model.explorer.ExplorerDirPage
 import org.autojs.autojs.model.explorer.Explorers
 import org.autojs.autojs.model.script.Scripts
@@ -94,6 +97,12 @@ class AgentBubble(context: Context) {
     // rather than constructed fresh per voice turn.
     private val mScreenStateReader = ScreenStateReader()
     private var mSpeechRecognizer: SpeechRecognizer? = null
+    private val mWalkieTalkieHandler = Handler(Looper.getMainLooper())
+    private val mWalkieTalkieSafetyStopRunnable = Runnable { mSpeechRecognizer?.stopListening() }
+    private val mVolumeUpHoldListener = object : GlobalKeyObserver.OnVolumeUpHoldListener {
+        override fun onVolumeUpHoldStart() = this@AgentBubble.onVolumeUpHoldStart()
+        override fun onVolumeUpHoldEnd() = this@AgentBubble.onVolumeUpHoldEnd()
+    }
 
     /**
      * One voice turn (screen description + the Claude call + running the
@@ -149,6 +158,8 @@ class AgentBubble(context: Context) {
         // override here.
         mWindow?.setKeepToSideHiddenWidthRadio(0f)
         FloatyService.addWindow(mWindow)
+        GlobalKeyObserver.init()
+        GlobalKeyObserver.getSingleton().addVolumeUpHoldListener(mVolumeUpHoldListener)
     }
 
     private fun updateIcon() {
@@ -256,12 +267,22 @@ class AgentBubble(context: Context) {
         listenForInstruction()
     }
 
-    /** Must be called on the main thread - SpeechRecognizer requires it. */
-    private fun listenForInstruction() {
+    /**
+     * Must be called on the main thread - SpeechRecognizer requires it.
+     *
+     * [walkieTalkie] suppresses Android's own silence-based auto-stop (a
+     * mid-sentence pause must not end a held-key instruction early) and
+     * schedules [WALKIE_TALKIE_MAX_HOLD_MILLIS] as a hard safety cap in case
+     * the key-release event is ever missed - [onVolumeUpHoldEnd] is the
+     * normal way listening ends for this path, by calling stopListening()
+     * directly, which this safety timer also does if it fires first.
+     */
+    private fun listenForInstruction(walkieTalkie: Boolean = false) {
         AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_listening))
         val recognizer = SpeechRecognizer.createSpeechRecognizer(mContext).also { mSpeechRecognizer = it }
         recognizer.setRecognitionListener(object : RecognitionListener {
             override fun onResults(results: Bundle) {
+                mWalkieTalkieHandler.removeCallbacks(mWalkieTalkieSafetyStopRunnable)
                 recognizer.destroy()
                 mSpeechRecognizer = null
                 val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
@@ -273,6 +294,7 @@ class AgentBubble(context: Context) {
             }
 
             override fun onError(error: Int) {
+                mWalkieTalkieHandler.removeCallbacks(mWalkieTalkieSafetyStopRunnable)
                 recognizer.destroy()
                 mSpeechRecognizer = null
                 AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_speech))
@@ -289,8 +311,48 @@ class AgentBubble(context: Context) {
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            if (walkieTalkie) {
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, WALKIE_TALKIE_MAX_HOLD_MILLIS)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, WALKIE_TALKIE_MAX_HOLD_MILLIS)
+            }
         }
         recognizer.startListening(intent)
+        if (walkieTalkie) {
+            mWalkieTalkieHandler.postDelayed(mWalkieTalkieSafetyStopRunnable, WALKIE_TALKIE_MAX_HOLD_MILLIS)
+        }
+    }
+
+    /** Invoked on the main thread by [GlobalKeyObserver] once a volume-up hold is confirmed. */
+    private fun onVolumeUpHoldStart() {
+        mWindow?.collapse()
+        // Identical guards to startVoiceTurn() - a held volume-up key begins
+        // the exact same kind of turn the mic button does, not a different one.
+        if (mRecorder.state == SemanticRecorder.State.RECORDING) return
+        if (mSpeechRecognizer != null) return
+        if (!AccessibilityServiceTool.isAccessibilityServiceEnabled(mContext)) {
+            AccessibilityServiceTool.goToAccessibilitySetting()
+            return
+        }
+        if (Pref.getClaudeApiKey().isBlank()) {
+            AutoJs.getInstance().uiHandler.toast(mContext.getString(R.string.text_agent_no_api_key))
+            return
+        }
+        val missing = Permissions.getPermissionsNeedToRequest(mContext, arrayOf("RECORD_AUDIO"))
+        if (missing.isNotEmpty()) {
+            Permissions.requestPermissions(mContext, missing)
+            return
+        }
+        if (mVoiceSession.state != VoiceAgentSession.State.ACTIVE) {
+            mVoiceSessionEpoch++
+            mVoiceSession.start()
+        }
+        listenForInstruction(walkieTalkie = true)
+    }
+
+    /** Invoked on the main thread by [GlobalKeyObserver] when a confirmed hold's key is released. */
+    private fun onVolumeUpHoldEnd() {
+        mWalkieTalkieHandler.removeCallbacks(mWalkieTalkieSafetyStopRunnable)
+        mSpeechRecognizer?.stopListening()
     }
 
     /** Runs the describe-plan-execute sequence on [voiceTurnExecutor]. */
@@ -644,6 +706,8 @@ class AgentBubble(context: Context) {
     fun close() {
         mSpeechRecognizer?.destroy()
         mSpeechRecognizer = null
+        mWalkieTalkieHandler.removeCallbacks(mWalkieTalkieSafetyStopRunnable)
+        GlobalKeyObserver.getSingleton().removeVolumeUpHoldListener(mVolumeUpHoldListener)
         // A turn still in flight when the bubble closes has no bubble left to
         // report into: flag it stale (see mVoiceSessionEpoch), kill the script
         // it may have driving the screen, and interrupt the executor rather
@@ -676,6 +740,15 @@ class AgentBubble(context: Context) {
          * in ActionScriptGenerator); this leaves headroom for script startup.
          */
         private const val VOICE_TURN_EXECUTION_TIMEOUT_MS = 15_000L
+
+        /**
+         * The walkie-talkie's hard safety cap on how long it keeps listening
+         * after a confirmed hold, independent of whether the key-release event
+         * is ever detected. Also used as the suppressed silence-detection
+         * window passed to RecognizerIntent, so a mid-sentence pause doesn't
+         * trigger Android's own default silence-based stop before this does.
+         */
+        private const val WALKIE_TALKIE_MAX_HOLD_MILLIS = 30_000L
 
         private var instance: AgentBubble? = null
 
