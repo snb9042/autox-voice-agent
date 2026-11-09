@@ -1,5 +1,7 @@
 package org.autojs.autojs.autojs.key;
 
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.KeyEvent;
 
@@ -23,6 +25,11 @@ public class GlobalKeyObserver implements OnKeyListener, ShellKeyObserver.KeyLis
         void onVolumeDown();
     }
 
+    public interface OnVolumeUpHoldListener {
+        void onVolumeUpHoldStart();
+        void onVolumeUpHoldEnd();
+    }
+
     private static final EventDispatcher.Event<OnVolumeDownListener> VOLUME_DOWN_EVENT = OnVolumeDownListener::onVolumeDown;
     private static final String LOG_TAG = "GlobalKeyObserver";
     private static final long EVENT_TIMEOUT = 200;
@@ -30,6 +37,19 @@ public class GlobalKeyObserver implements OnKeyListener, ShellKeyObserver.KeyLis
     private EventDispatcher<OnVolumeDownListener> mVolumeDownEventDispatcher = new EventDispatcher<>();
     private boolean mVolumeDownFromShell, mVolumeDownFromAccessibility;
     private boolean mVolumeUpFromShell, mVolumeUpFromAccessibility;
+    // Tracks the DOWN edge of volume-up specifically, separately from the
+    // existing mVolumeUpFromShell/mVolumeUpFromAccessibility pair above
+    // (which dedup the UP edge) - deliberately not reusing or mirroring the
+    // KEYCODE_VOLUME_DOWN branch's existing mVolumeUpFromAccessibility
+    // mismatch below, which is a pre-existing bug left untouched here.
+    private boolean mVolumeUpDownFromShell, mVolumeUpDownFromAccessibility;
+    private boolean mVolumeUpHoldConfirmed;
+    private static final long VOLUME_UP_HOLD_THRESHOLD_MILLIS = 400;
+    private final Handler mHandler = new Handler(Looper.getMainLooper());
+    private final Runnable mVolumeUpHoldConfirmRunnable = this::onVolumeUpHoldConfirmed;
+    private final EventDispatcher<OnVolumeUpHoldListener> mVolumeUpHoldEventDispatcher = new EventDispatcher<>();
+    private static final EventDispatcher.Event<OnVolumeUpHoldListener> VOLUME_UP_HOLD_START_EVENT = OnVolumeUpHoldListener::onVolumeUpHoldStart;
+    private static final EventDispatcher.Event<OnVolumeUpHoldListener> VOLUME_UP_HOLD_END_EVENT = OnVolumeUpHoldListener::onVolumeUpHoldEnd;
 
     GlobalKeyObserver() {
         AccessibilityService.Companion.getStickOnKeyObserver()
@@ -52,6 +72,17 @@ public class GlobalKeyObserver implements OnKeyListener, ShellKeyObserver.KeyLis
 
     public void onVolumeUp() {
         Log.d(LOG_TAG, "onVolumeUp at " + System.currentTimeMillis());
+        mHandler.removeCallbacks(mVolumeUpHoldConfirmRunnable);
+        if (mVolumeUpHoldConfirmed) {
+            mVolumeUpHoldConfirmed = false;
+            // Route through the main-thread handler even though this method
+            // itself may already be running off-main (see this plan's Global
+            // Constraints) - dispatchEvent is a plain synchronous loop with no
+            // thread hop of its own, and the listener's SpeechRecognizer calls
+            // require the main thread.
+            mHandler.post(() -> mVolumeUpHoldEventDispatcher.dispatchEvent(VOLUME_UP_HOLD_END_EVENT));
+            return;
+        }
         if (Pref.isRunningVolumeControlEnabled()) {
             AutoJs.getInstance().getScriptEngineService().stopAllAndToast();
         }
@@ -70,8 +101,36 @@ public class GlobalKeyObserver implements OnKeyListener, ShellKeyObserver.KeyLis
         return mVolumeDownEventDispatcher.removeListener(listener);
     }
 
+    public void addVolumeUpHoldListener(OnVolumeUpHoldListener listener) {
+        mVolumeUpHoldEventDispatcher.addListener(listener);
+    }
+
+    public boolean removeVolumeUpHoldListener(OnVolumeUpHoldListener listener) {
+        return mVolumeUpHoldEventDispatcher.removeListener(listener);
+    }
+
+    private void onVolumeUpDown() {
+        mVolumeUpHoldConfirmed = false;
+        mHandler.removeCallbacks(mVolumeUpHoldConfirmRunnable);
+        mHandler.postDelayed(mVolumeUpHoldConfirmRunnable, VOLUME_UP_HOLD_THRESHOLD_MILLIS);
+    }
+
+    private void onVolumeUpHoldConfirmed() {
+        mVolumeUpHoldConfirmed = true;
+        mVolumeUpHoldEventDispatcher.dispatchEvent(VOLUME_UP_HOLD_START_EVENT);
+    }
+
     @Override
     public void onKeyEvent(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP && event.getAction() == KeyEvent.ACTION_DOWN) {
+            if (mVolumeUpDownFromShell) {
+                mVolumeUpDownFromShell = false;
+                return;
+            }
+            mVolumeUpDownFromAccessibility = true;
+            onVolumeUpDown();
+            return;
+        }
         if (event.getAction() != KeyEvent.ACTION_UP)
             return;
         if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
@@ -94,7 +153,14 @@ public class GlobalKeyObserver implements OnKeyListener, ShellKeyObserver.KeyLis
 
     @Override
     public void onKeyDown(String keyName) {
-
+        if ("KEY_VOLUMEUP".equals(keyName)) {
+            if (mVolumeUpDownFromAccessibility) {
+                mVolumeUpDownFromAccessibility = false;
+                return;
+            }
+            mVolumeUpDownFromShell = true;
+            onVolumeUpDown();
+        }
     }
 
     @Override
